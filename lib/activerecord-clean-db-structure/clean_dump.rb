@@ -121,6 +121,10 @@ module ActiveRecordCleanDbStructure
       dump.gsub!(/\n{2,}/m, "\n\n")
       # End the file with a single end-of-line character
       dump.sub!(/\n*\z/m, "\n")
+
+      if options[:order_column_definitions] == true
+        order_column_definitions
+      end
     end
 
     private
@@ -174,6 +178,17 @@ module ActiveRecordCleanDbStructure
         dump.gsub!(/^(?<statement>CREATE TABLE #{table} \(.*?\s+#{column}\s+[^,\n]+)/m) do
           "#{$LAST_MATCH_INFO[:statement].remove(/ NOT NULL\z/)} PRIMARY KEY"
         end
+      end
+    end
+    
+    # Orders the columns definitions alphabetically
+    # - keeps the columns at the top and places the constraints at the bottom.
+    def order_column_definitions
+      dump.gsub!(/^(?<table>CREATE TABLE .+?\(\n)(?<columns>.+?)(?=\n\);$)/m) do
+        [
+          $~[:table],
+          $~[:columns].split(",\n").sort.partition { |column| !column.match?(/\A *CONSTRAINT/) }.flatten.join(",\n")
+        ].join
       end
     end
 

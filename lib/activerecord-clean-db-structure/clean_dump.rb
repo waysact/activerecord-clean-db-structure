@@ -32,11 +32,15 @@ module ActiveRecordCleanDbStructure
       # Remove comments on extensions, they create problems if the extension is owned by another user
       dump.gsub!(/^COMMENT ON EXTENSION .*/, '')
 
-      # Remove useless, version-specific parts of comments
-      dump.gsub!(/^-- (.*); Schema: ([\w_\.]+|-); Owner: -.*/, '-- \1')
+      if options[:remove_all_comment_lines] == true
+        dump.gsub!(/^--.*/, '')
+      else
+        # Remove useless, version-specific parts of comments
+        dump.gsub!(/^-- (.*); Schema: ([\w_\.]+|-); Owner: -.*/, '-- \1')
 
-      # Remove useless comment lines
-      dump.gsub!(/^--$/, '')
+        # Remove useless comment lines
+        dump.gsub!(/^--$/, '')
+      end
 
       # Reduce noise for id fields by making them (BIG)SERIAL instead of integer+sequence stuff
       unless options[:ignore_ids] == true
@@ -125,6 +129,7 @@ module ActiveRecordCleanDbStructure
       if options[:order_column_definitions] == true
         order_column_definitions
       end
+      dump
     end
 
     private
@@ -153,8 +158,8 @@ module ActiveRecordCleanDbStructure
     # NOTE: does not work work for columns with a name other than 'id'
     # NOTE: does not work for SMALLSERIAL
     def sequences_cleanup
-      dump.gsub!(/^    id integer NOT NULL(,)?$/, '    id SERIAL\1')
-      dump.gsub!(/^    id bigint NOT NULL(,)?$/, '    id BIGSERIAL\1')
+      dump.gsub!(/^    id integer NOT NULL(,)?$/, '    id SERIAL PRIMARY KEY\1')
+      dump.gsub!(/^    id bigint NOT NULL(,)?$/, '    id BIGSERIAL PRIMARY KEY\1')
       dump.gsub!(/^CREATE SEQUENCE [\w\.]+_id_seq\s+(AS integer\s+)?START WITH 1\s+INCREMENT BY 1\s+NO MINVALUE\s+NO MAXVALUE\s+CACHE 1;$/, '')
       dump.gsub!(/^ALTER SEQUENCE [\w\.]+_id_seq OWNED BY .*;$/, '')
       dump.gsub!(/^ALTER TABLE ONLY [\w\.]+ ALTER COLUMN id SET DEFAULT nextval\('[\w\.]+_id_seq'::regclass\);$/, '')
@@ -167,8 +172,8 @@ module ActiveRecordCleanDbStructure
       primary_keys = []
 
       # Removes the ADD CONSTRAINT statements for primary keys and stores the info of which statements have been removed.
-      dump.gsub!(/^-- Name: [\w\s]+?(?<name>\w+_pkey); Type: CONSTRAINT[\s-]+ALTER TABLE ONLY (?<table>[\w.]+)\s+ADD CONSTRAINT \k<name> PRIMARY KEY \((?<column>[^,\)]+)\);$/) do
-        primary_keys.push([$LAST_MATCH_INFO[:table], $LAST_MATCH_INFO[:column]])
+      dump.gsub!(/^ALTER TABLE ONLY ([\w.]+)\s+ADD CONSTRAINT \w+ PRIMARY KEY \((?<column>[^,\)]+)\);$/) do
+        # primary_keys.push([$LAST_MATCH_INFO[:table], $LAST_MATCH_INFO[:column]])
 
         ''
       end
@@ -234,3 +239,4 @@ module ActiveRecordCleanDbStructure
     end
   end
 end
+

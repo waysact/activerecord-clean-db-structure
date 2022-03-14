@@ -85,8 +85,7 @@ Rails.application.configure do
 end
 ```
 
-
-When it is enabled the values are ordered chronological and the semicolon is placed on a separate line:
+When `order_schema_migrations_values` is enabled the values are ordered chronologically and the semicolon is placed on a separate line:
 
 ```sql
 INSERT INTO "schema_migrations" (version) VALUES
@@ -94,6 +93,14 @@ INSERT INTO "schema_migrations" (version) VALUES
 ,('20190508123941')
 ,('20190508132644')
 ;
+```
+
+To reduce the potential for merge conflicts even more, set it to `:jumbled`. This will randomize migration versions in a deterministic fashion, the downside being that the list becomes less readable. The upside is that with a sufficiently large number of migrations, two migration versions are unlikely to end up on adjacent lines:
+
+```ruby
+Rails.application.configure do
+  config.activerecord_clean_db_structure.order_schema_migrations_values = :jumbled
+end
 ```
 
 ## Authors

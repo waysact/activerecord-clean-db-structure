@@ -1,3 +1,5 @@
+require 'digest'
+
 module ActiveRecordCleanDbStructure
   class CleanDump
     attr_reader :dump, :options
@@ -92,7 +94,7 @@ module ActiveRecordCleanDbStructure
       # This is mostly done to allow restoring Postgres 11 output on Postgres 10
       dump.gsub!(/CREATE INDEX ([\w_]+) ON ONLY/, 'CREATE INDEX \\1 ON')
 
-      if options[:order_schema_migrations_values] == true
+      if options[:order_schema_migrations_values]
         schema_migrations_cleanup
       else
         # Remove whitespace between schema migration INSERTS to make editing easier
@@ -202,12 +204,17 @@ module ActiveRecordCleanDbStructure
     end
 
     # Cleanup of schema_migrations values to prevent merge conflicts:
-    # - sorts all values chronological
+    # - sorts all values chronological, or randomly if
+    #   order_schema_migrations_values is set to :jumbled
     # - places the comma's in front of each value (except for the first)
     # - places the semicolon on a separate last line
     def schema_migrations_cleanup
       # Read all schema_migrations values from the dump.
       values = dump.scan(/^(\(\'\d{14}\'\))[,;]\n/).flatten.sort
+
+      if options[:order_schema_migrations_values] == :jumbled
+        values.sort_by! { |v| [::Digest::SHA2.hexdigest(v[2...-2]), v].join }
+      end
 
       # Replace the schema_migrations values.
       dump.sub!(

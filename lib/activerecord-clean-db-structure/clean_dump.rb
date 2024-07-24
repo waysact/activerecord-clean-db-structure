@@ -73,7 +73,7 @@ module ActiveRecordCleanDbStructure
 
       partitioned_tables.each do |partitioned_table|
         partitioned_schema_name, partitioned_table_name_only = partitioned_table.split('.', 2)
-        dump.gsub!(/-- Name: #{partitioned_table_name_only}; Type: TABLE/, '')
+        dump.gsub!(/-- Name: #{partitioned_table_name_only}; Type: TABLE(?: ATTACH)?/, '')
         dump.gsub!(/CREATE TABLE #{partitioned_table} \([^;]+;/m, '')
         dump.gsub!(/ALTER TABLE ONLY ([\w_\.]+) ATTACH PARTITION #{partitioned_table}[^;]+;/m, '')
 

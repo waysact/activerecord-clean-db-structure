@@ -89,7 +89,7 @@ module ActiveRecordCleanDbStructure
         end
         dump.gsub!(index_regexp, '')
 
-        dump.gsub!(/-- Name: #{partitioned_table}_pkey; Type: INDEX ATTACH\n\n[^;]+?ATTACH PARTITION ([\w_]+\.)?#{partitioned_table}_pkey;/, '')
+        dump.gsub!(/-- Name: ([\w_]+\.)?#{partitioned_table_name_only}_pkey; Type: INDEX ATTACH\n\n[^;]+?ATTACH PARTITION ([\w_]+\.)?#{partitioned_table}_pkey;/, '')
       end
       # This is mostly done to allow restoring Postgres 11 output on Postgres 10
       dump.gsub!(/CREATE INDEX ([\w_]+) ON ONLY/, 'CREATE INDEX \\1 ON')
@@ -135,7 +135,7 @@ module ActiveRecordCleanDbStructure
     # - ignores quotes which surround column names that are equal to reserved PostgreSQL names.
     # - keeps the columns at the top and places the constraints at the bottom.
     def order_column_definitions
-      dump.gsub!(/^(?<table>CREATE TABLE .+?\(\n)(?<columns>.+?)(?=\n\);$)/m) do
+      dump.gsub!(/^(?<table>CREATE TABLE .+?\(\n)(?<columns>.+?)(?=\n\)(?:\nPARTITION BY.*)?;$)/m) do
         table = $~[:table]
         columns =
           $~[:columns]

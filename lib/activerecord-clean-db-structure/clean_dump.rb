@@ -90,6 +90,10 @@ module ActiveRecordCleanDbStructure
         dump.gsub!(index_regexp, '')
 
         dump.gsub!(/-- Name: ([\w_]+\.)?#{partitioned_table_name_only}_pkey; Type: INDEX ATTACH\n\n[^;]+?ATTACH PARTITION ([\w_]+\.)?#{partitioned_table}_pkey;/, '')
+
+        dump.gsub!(/-- Name: TABLE ([\w_]+\.)?#{partitioned_table_name_only}; Type: COMMENT\s*\n\s*\nCOMMENT ON TABLE ([\w_]+\.)?#{partitioned_table_name_only} IS '(?:[^']|\n|'')*';/m, '');
+
+        dump.gsub!(/-- Name: [^;]+; Type: STATISTICS\s*\n\s*\nCREATE STATISTICS .*? FROM ([\w_]+\.)?#{partitioned_table_name_only};/m, '');
       end
       # This is mostly done to allow restoring Postgres 11 output on Postgres 10
       dump.gsub!(/CREATE INDEX ([\w_]+) ON ONLY/, 'CREATE INDEX \\1 ON')

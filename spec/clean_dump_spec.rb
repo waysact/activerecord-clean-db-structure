@@ -48,5 +48,41 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
         STRUCTURE_SQL
       end
     end
+
+    context 'when sorting indexes' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              id BIGSERIAL
+          );
+
+          CREATE TABLE waysact.other (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX foo ON waysact.call_events (id);
+
+          CREATE INDEX "bar" ON waysact.call_events (id);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'works' do
+        subject.run
+        expect(subject.dump).to eq(<<~STRUCTURE_SQL)
+          CREATE TABLE waysact.call_events (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX foo ON waysact.call_events (id);
+          CREATE INDEX "bar" ON waysact.call_events (id);
+
+          CREATE TABLE waysact.other (
+              id BIGSERIAL
+          );
+        STRUCTURE_SQL
+      end
+    end
   end
 end

@@ -17,6 +17,11 @@ module ActiveRecordCleanDbStructure
       dump.gsub!(/\A\n/, '')
       dump.gsub!(/\n\n\z/, "\n")
 
+      if options[:schemas_extensions_if_not_exists]
+        dump.gsub!(/^CREATE SCHEMA (?!IF NOT EXISTS)/, 'CREATE SCHEMA IF NOT EXISTS ')
+        dump.gsub!(/^CREATE EXTENSION (?!IF NOT EXISTS)/, 'CREATE EXTENSION IF NOT EXISTS ')
+      end
+
       # Remove version-specific output
       dump.gsub!(/^-- Dumped.*/, '')
       dump.gsub!(/^SET row_security = off;\n/m, '') # 9.5

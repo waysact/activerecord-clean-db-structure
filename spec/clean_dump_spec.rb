@@ -49,6 +49,76 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when schemas_extensions_if_not_exists is enabled' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE SCHEMA waysact;
+
+          CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA waysact;
+
+          CREATE EXTENSION plrust WITH SCHEMA plrust;
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { schemas_extensions_if_not_exists: true } }
+
+      it 'adds IF NOT EXISTS to CREATE SCHEMA' do
+        subject.run
+        expect(subject.dump).to include('CREATE SCHEMA IF NOT EXISTS waysact;')
+        expect(subject.dump).not_to match(/^CREATE SCHEMA (?!IF)/)
+      end
+
+      it 'adds IF NOT EXISTS to CREATE EXTENSION' do
+        subject.run
+        expect(subject.dump).not_to match(/CREATE EXTENSION (?!IF)/)
+      end
+    end
+
+    context 'when schemas_extensions_if_not_exists is not set' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE SCHEMA waysact;
+
+          CREATE EXTENSION plrust WITH SCHEMA plrust;
+        STRUCTURE_SQL
+      end
+
+      it 'leaves statements unchanged' do
+        subject.run
+        expect(subject.dump).to include('CREATE SCHEMA waysact;')
+        expect(subject.dump).to include('CREATE EXTENSION plrust')
+        expect(subject.dump).not_to include('IF NOT EXISTS')
+      end
+    end
+
+    context 'when cleaning up sequences' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.things (
+              id bigint NOT NULL
+          );
+
+          CREATE SEQUENCE waysact.things_id_seq
+              START WITH 1
+              INCREMENT BY 1
+              NO MINVALUE
+              NO MAXVALUE
+              CACHE 1;
+
+          ALTER TABLE waysact.things_id_seq OWNER TO waysact;
+
+          ALTER SEQUENCE waysact.things_id_seq OWNED BY waysact.things.id;
+
+          ALTER TABLE ONLY waysact.things ALTER COLUMN id SET DEFAULT nextval('waysact.things_id_seq'::regclass);
+        STRUCTURE_SQL
+      end
+
+      it 'removes the sequence OWNER TO statement' do
+        subject.run
+        expect(subject.dump).not_to include('things_id_seq')
+      end
+    end
+
     context 'when removing partitioned tables' do
       let(:dump) do
         <<~STRUCTURE_SQL

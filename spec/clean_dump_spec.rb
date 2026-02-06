@@ -49,6 +49,164 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when removing partitioned tables' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          --
+          -- Name: events; Type: TABLE; Schema: waysact; Owner: waysact
+          --
+
+          CREATE TABLE waysact.events (
+              id bigint NOT NULL
+          )
+          PARTITION BY RANGE (id);
+
+          --
+          -- Name: events_p2024; Type: TABLE; Schema: waysact; Owner: waysact
+          --
+
+          CREATE TABLE waysact.events_p2024 (
+              id bigint NOT NULL
+          );
+
+          ALTER TABLE ONLY waysact.events ATTACH PARTITION waysact.events_p2024 FOR VALUES FROM (1) TO (100);
+
+          --
+          -- Name: idx_events_p2024_id; Type: INDEX; Schema: waysact; Owner: waysact
+          --
+
+          CREATE INDEX idx_events_p2024_id ON waysact.events_p2024 USING btree (id);
+
+          ALTER TABLE waysact.events_p2024 OWNER TO waysact;
+
+          --
+          -- Name: events_p2024 events_p2024_pkey; Type: CONSTRAINT; Schema: waysact; Owner: waysact
+          --
+
+          --
+          -- Name: events_p2024_pkey; Type: INDEX ATTACH; Schema: waysact; Owner: waysact
+          --
+
+          ALTER INDEX waysact.events_pkey ATTACH PARTITION waysact.events_p2024_pkey;
+
+          --
+          -- Name: TABLE events_p2024; Type: COMMENT; Schema: waysact; Owner: waysact
+          --
+
+          COMMENT ON TABLE waysact.events_p2024 IS 'A partition for 2024 data';
+
+          --
+          -- Name: events_p2024_stats; Type: STATISTICS; Schema: waysact; Owner: waysact
+          --
+
+          CREATE STATISTICS waysact.events_p2024_stats ON id FROM waysact.events_p2024;
+
+          ALTER STATISTICS waysact.events_p2024_stats OWNER TO waysact;
+        STRUCTURE_SQL
+      end
+
+      it 'does not leave orphaned comment suffixes as bare SQL' do
+        subject.run
+        expect(subject.dump).not_to match(/^; Schema:/)
+      end
+
+      it 'removes all references to the partition' do
+        subject.run
+        expect(subject.dump).not_to include('events_p2024')
+      end
+    end
+
+    context 'when removing inherited tables' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          --
+          -- Name: parent; Type: TABLE; Schema: waysact; Owner: waysact
+          --
+
+          CREATE TABLE waysact.parent (
+              id bigint NOT NULL
+          );
+
+          --
+          -- Name: child; Type: TABLE; Schema: waysact; Owner: waysact
+          --
+
+          CREATE TABLE waysact.child (
+              id bigint NOT NULL
+          )
+          INHERITS (waysact.parent);
+
+          --
+          -- Name: idx_child_id; Type: INDEX; Schema: waysact; Owner: waysact
+          --
+
+          CREATE INDEX idx_child_id ON waysact.child USING btree (id);
+        STRUCTURE_SQL
+      end
+
+      it 'does not leave orphaned comment suffixes as bare SQL' do
+        subject.run
+        expect(subject.dump).not_to match(/^; Schema:/)
+      end
+    end
+
+    context 'when ordering column definitions with multiline constraints' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              id bigint NOT NULL,
+              call_uuid uuid NOT NULL,
+              event_type text NOT NULL,
+              payload jsonb,
+              CONSTRAINT call_events_valid CHECK (
+          CASE
+              WHEN (event_type = 'initiated'::text) THEN validate_json_schema('{"required": ["CallSid"],
+          event_type text NOT NULL,
+          next_states text[]}'::jsonb, payload)
+              ELSE false
+          END)
+          );
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'keeps the constraint body intact' do
+        subject.run
+        expect(subject.dump).to include(
+          %{validate_json_schema('{"required": ["CallSid"],\nevent_type text NOT NULL,\nnext_states text[]}'::jsonb, payload)}
+        )
+      end
+    end
+
+    context 'when ordering column definitions with WITH clause' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              name text NOT NULL,
+              id bigint NOT NULL
+          )
+          WITH (fillfactor='85');
+
+          CREATE TABLE waysact.other (
+              id bigint NOT NULL,
+              value text
+          );
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'does not move columns between tables' do
+        subject.run
+        expect(subject.dump).to include('call_events')
+        expect(subject.dump).to include('name text NOT NULL')
+        # name must remain inside call_events, not move to other
+        other_block = subject.dump[/CREATE TABLE waysact\.other \(.*?\);/m]
+        expect(other_block).not_to include('name')
+      end
+    end
+
     context 'when sorting indexes' do
       let(:dump) do
         <<~STRUCTURE_SQL
@@ -82,6 +240,27 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
               id BIGSERIAL
           );
         STRUCTURE_SQL
+      end
+    end
+
+    context 'when sorting indexes with WITH clause on table' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              id BIGSERIAL
+          )
+          WITH (fillfactor='85');
+
+          CREATE INDEX foo ON waysact.call_events (id);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'places indexes after the table' do
+        subject.run
+        expect(subject.dump).to include("WITH (fillfactor='85');")
+        expect(subject.dump).to include('CREATE INDEX foo ON waysact.call_events (id);')
       end
     end
   end

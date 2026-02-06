@@ -57,7 +57,7 @@ module ActiveRecordCleanDbStructure
 
         index_regexp = /CREATE INDEX ([\w_]+) ON ([\w_]+\.)?#{inherited_table}[^;]+;/m
         dump.scan(index_regexp).map(&:first).each do |inherited_table_index|
-          dump.gsub!("-- Name: #{inherited_table_index}; Type: INDEX", '')
+          dump.gsub!(/-- Name: #{Regexp.escape(inherited_table_index)}; Type: INDEX.*/, '')
         end
         dump.gsub!(index_regexp, '')
       end
@@ -75,27 +75,33 @@ module ActiveRecordCleanDbStructure
 
       partitioned_tables.each do |partitioned_table|
         partitioned_schema_name, partitioned_table_name_only = partitioned_table.split('.', 2)
-        dump.gsub!(/-- Name: #{partitioned_table_name_only}; Type: TABLE(?: ATTACH)?/, '')
+        dump.gsub!(/-- Name: #{partitioned_table_name_only}; Type: TABLE(?: ATTACH)?.*/, '')
         dump.gsub!(/CREATE TABLE #{partitioned_table} \([^;]+;/m, '')
         dump.gsub!(/ALTER TABLE ONLY ([\w_\.]+) ATTACH PARTITION #{partitioned_table}[^;]+;/m, '')
 
         dump.gsub!(/ALTER TABLE ONLY ([\w_]+\.)?#{partitioned_table}[^;]+;/, '')
-        dump.gsub!(/-- Name: #{partitioned_table} [^;]+; Type: DEFAULT/, '')
+        dump.gsub!(/ALTER TABLE ([\w_]+\.)?#{partitioned_table} OWNER TO [^;]+;/, '')
+        dump.gsub!(/-- Name: #{partitioned_table} [^;]+; Type: DEFAULT.*/, '')
+        dump.gsub!(/-- Name: #{partitioned_table_name_only} [^;]+; Type: CONSTRAINT.*/, '')
 
         index_regexp = /CREATE (UNIQUE )?INDEX ([\w_]+) ON ([\w_]+\.)?#{partitioned_table}[^;]+;/m
         dump.scan(index_regexp).each do |m|
           partitioned_table_index = m[1]
-          dump.gsub!("-- Name: #{partitioned_table_index}; Type: INDEX ATTACH", '')
-          dump.gsub!("-- Name: #{partitioned_table_index}; Type: INDEX", '')
+          dump.gsub!(/-- Name: #{Regexp.escape(partitioned_table_index)}; Type: INDEX ATTACH.*/, '')
+          dump.gsub!(/-- Name: #{Regexp.escape(partitioned_table_index)}; Type: INDEX.*/, '')
           dump.gsub!(/ALTER INDEX ([\w_\.]+) ATTACH PARTITION ([\w_]+\.)?#{partitioned_table_index};/, '')
         end
         dump.gsub!(index_regexp, '')
 
-        dump.gsub!(/-- Name: ([\w_]+\.)?#{partitioned_table_name_only}_pkey; Type: INDEX ATTACH\n\n[^;]+?ATTACH PARTITION ([\w_]+\.)?#{partitioned_table}_pkey;/, '')
+        dump.gsub!(/-- Name: ([\w_]+\.)?#{partitioned_table_name_only}_pkey; Type: INDEX ATTACH.*\n\n[^;]+?ATTACH PARTITION ([\w_]+\.)?#{partitioned_table}_pkey;/, '')
 
-        dump.gsub!(/-- Name: TABLE ([\w_]+\.)?#{partitioned_table_name_only}; Type: COMMENT\s*\n\s*\nCOMMENT ON TABLE ([\w_]+\.)?#{partitioned_table_name_only} IS '(?:[^']|\n|'')*';/m, '');
+        dump.gsub!(/-- Name: TABLE ([\w_]+\.)?#{partitioned_table_name_only}; Type: COMMENT.*\n\s*\nCOMMENT ON TABLE ([\w_]+\.)?#{partitioned_table_name_only} IS '(?:[^']|\n|'')*';/m, '');
 
-        dump.gsub!(/-- Name: [^;]+; Type: STATISTICS\s*\n\s*\nCREATE STATISTICS .*? FROM ([\w_]+\.)?#{partitioned_table_name_only};/m, '');
+        stats_regexp = /-- Name: [^;]+; Type: STATISTICS.*\n\s*\nCREATE STATISTICS ([\w_\.]+) .*? FROM ([\w_]+\.)?#{partitioned_table_name_only};/m
+        dump.scan(stats_regexp).each do |m|
+          dump.gsub!(/ALTER STATISTICS #{Regexp.escape(m[0])} OWNER TO [^;]+;/, '')
+        end
+        dump.gsub!(stats_regexp, '');
       end
       # This is mostly done to allow restoring Postgres 11 output on Postgres 10
       dump.gsub!(/CREATE INDEX ([\w_]+) ON ONLY/, 'CREATE INDEX \\1 ON')
@@ -118,7 +124,7 @@ module ActiveRecordCleanDbStructure
         dump.gsub!(/^CREATE( UNIQUE)? INDEX \"?\w+\"? ON .+\n+/, '')
         dump.gsub!(/^-- Name: \w+; Type: INDEX\n+/, '')
         indexes.each do |table, indexes_for_table|
-          dump.gsub!(/^(CREATE TABLE #{table}\b(:?[^;\n]*\n)+\);\n)/) { $1 + "\n" + indexes_for_table }
+          dump.gsub!(/^(CREATE TABLE #{table}\b(:?[^;\n]*\n)+\)[^;]*;\n)/) { $1 + "\n" + indexes_for_table }
         end
       end
 
@@ -141,11 +147,10 @@ module ActiveRecordCleanDbStructure
     # - ignores quotes which surround column names that are equal to reserved PostgreSQL names.
     # - keeps the columns at the top and places the constraints at the bottom.
     def order_column_definitions
-      dump.gsub!(/^(?<table>CREATE TABLE .+?\(\n)(?<columns>.+?)(?=\n\)(?:\nPARTITION BY.*)?;$)/m) do
+      dump.gsub!(/^(?<table>CREATE TABLE .+?\(\n)(?<columns>.+?)(?=\n\)(?:\nPARTITION BY.*|(?:\nWITH \([^)]*\)))?;$)/m) do
         table = $~[:table]
         columns =
-          $~[:columns]
-          .split(",\n")
+          split_column_definitions($~[:columns])
           .sort_by { |column| column.delete('"') }
           .partition { |column| !column.match?(/\A *CONSTRAINT/) }
           .flatten
@@ -153,6 +158,54 @@ module ActiveRecordCleanDbStructure
 
         [table, columns].join
       end
+    end
+
+    # Splits column definitions on ",\n" only at parenthesis depth 0,
+    # respecting single-quoted strings (which may contain parentheses).
+    def split_column_definitions(text)
+      parts = []
+      current = +""
+      depth = 0
+      in_string = false
+      i = 0
+
+      while i < text.length
+        char = text[i]
+
+        if in_string
+          if char == "'" && text[i + 1] == "'"
+            current << "''"
+            i += 2
+            next
+          elsif char == "'"
+            in_string = false
+          end
+          current << char
+        else
+          if char == "'"
+            in_string = true
+            current << char
+          elsif char == "("
+            depth += 1
+            current << char
+          elsif char == ")"
+            depth -= 1
+            current << char
+          elsif char == "," && text[i + 1] == "\n" && depth == 0
+            parts << current
+            current = +""
+            i += 2
+            next
+          else
+            current << char
+          end
+        end
+
+        i += 1
+      end
+
+      parts << current unless current.empty?
+      parts
     end
 
     # Reduce noise for id fields by making them (BIG)SERIAL instead of integer+sequence stuff
@@ -165,6 +218,7 @@ module ActiveRecordCleanDbStructure
       dump.gsub!(/^    id bigint NOT NULL(,)?$/, '    id BIGSERIAL\1')
       dump.gsub!(/^CREATE SEQUENCE [\w\.]+_id_seq\s+(AS integer\s+)?START WITH 1\s+INCREMENT BY 1\s+NO MINVALUE\s+NO MAXVALUE\s+CACHE 1;$/, '')
       dump.gsub!(/^ALTER SEQUENCE [\w\.]+_id_seq OWNED BY .*;$/, '')
+      dump.gsub!(/^ALTER TABLE [\w\.]+_id_seq OWNER TO .*;$/, '')
       dump.gsub!(/^ALTER TABLE ONLY [\w\.]+ ALTER COLUMN id SET DEFAULT nextval\('[\w\.]+_id_seq'::regclass\);$/, '')
       dump.gsub!(/^-- Name: (\w+\s+)?id; Type: DEFAULT$/, '')
       dump.gsub!(/^-- .*_id_seq; Type: SEQUENCE.*/, '')

@@ -10,6 +10,8 @@ module ActiveRecordCleanDbStructure
     end
 
     def run
+      return dump unless options.fetch(:enabled, true)
+
       # Remove trailing whitespace
       dump.gsub!(/[ \t]+$/, '')
       dump.gsub!(/\A\n/, '')

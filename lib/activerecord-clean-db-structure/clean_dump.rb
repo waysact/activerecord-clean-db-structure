@@ -279,6 +279,8 @@ module ActiveRecordCleanDbStructure
 
       if options[:order_schema_migrations_values] == :jumbled
         values.sort_by! { |v| [::Digest::SHA2.hexdigest(v[2...-2]), v].join }
+      elsif options[:order_schema_migrations_values] == :reversed
+        values.sort_by! { |v| v[2...-2].reverse }
       end
 
       # Replace the schema_migrations values.

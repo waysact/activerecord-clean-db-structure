@@ -2,7 +2,35 @@
 
 ## Unreleased
 
-* ...
+* Fix `order_schema_migrations_values` deleting every migration version when the
+  cleaner runs over its own output. The reader now accepts both the raw pg_dump
+  format and the format the cleaner writes, and raises `NoSchemaMigrationValues`
+  instead of writing an empty version list
+* Make `run` idempotent, so that cleaning an already cleaned file is a no-op
+* Fix `indexes_after_tables` duplicating an index whose name needs quoting, and
+  dropping an index whose name contains a dot
+* Fix `indexes_after_tables` copying an index onto every table when the index
+  target has no schema prefix
+* Handle `CREATE UNLOGGED TABLE` in `order_column_definitions`,
+  `indexes_after_tables`, `ignore_ids` and `move_unique_constraints_to_tables`
+* Fix `order_column_definitions` moving columns into the next table when a table
+  ends with a `USING`, `INHERITS`, `TABLESPACE` or `SERVER` clause
+* Fix `move_unique_constraints_to_tables` discarding the constraint when the
+  table ends with a `WITH` clause
+* Require `English`, which the primary key and unique constraint cleanups need,
+  and drop the undeclared ActiveSupport dependency of `CleanDump`
+* Escape table, column and index names before interpolating them into patterns
+* `run` now returns the cleaned dump instead of `nil`
+* Remove the duplicate `order_column_definitions` call
+* Ask Rails which files `db:schema:dump` wrote instead of rebuilding the names.
+  This fixes the task looking for `primary_structure.sql`, which does not exist
+  and made `db:schema:dump` fail on an application with more than one database
+  that has schema tasks enabled. It also honours `ENV["SCHEMA"]`, the
+  per-database `schema_dump` setting, and skips replicas, databases with
+  `database_tasks: false`, and databases that dump to `schema.rb`
+* Stop defining a top level `PRE_6_1` constant in the host application
+* Add specs for the rake task, and pin the development dependencies to the Rails
+  version the consuming application runs
 
 ## 0.4.0    2019-08-27
 

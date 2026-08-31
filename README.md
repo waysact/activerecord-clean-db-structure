@@ -103,6 +103,34 @@ Rails.application.configure do
 end
 ```
 
+Set it to `:reversed` for a different deterministic order. This sorts the values by the reversed version string, so that migrations added at the same time do not end up next to each other:
+
+```ruby
+Rails.application.configure do
+  config.activerecord_clean_db_structure.order_schema_migrations_values = :reversed
+end
+```
+
+To add `IF NOT EXISTS` to the `CREATE SCHEMA` and `CREATE EXTENSION` statements, set `schemas_extensions_if_not_exists`. This lets you load the structure into a database that already has the schemas or the extensions:
+
+```ruby
+Rails.application.configure do
+  config.activerecord_clean_db_structure.schemas_extensions_if_not_exists = true
+end
+```
+
+To turn the cleanup off completely and keep the raw `pg_dump` output, set `enabled` to false:
+
+```ruby
+Rails.application.configure do
+  config.activerecord_clean_db_structure.enabled = false
+end
+```
+
+## Idempotency
+
+The cleaner gives the same result when you run it on its own output. You can therefore use it to check that a committed `structure.sql` is current: clean a fresh dump, then compare it with the committed file.
+
 ## Authors
 
 * [Lukas Fittl](https://github.com/lfittl)

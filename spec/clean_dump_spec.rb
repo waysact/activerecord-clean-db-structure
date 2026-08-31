@@ -813,6 +813,87 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when indexes have comments' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE TABLE waysact.other (
+              id BIGSERIAL
+          );
+
+          --
+          -- Name: idx_users_email; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX idx_users_email ON waysact.users USING btree (email);
+
+          --
+          -- Name: idx_users_name; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX idx_users_name ON waysact.users USING btree (name);
+
+          --
+          -- Name: INDEX idx_users_email; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON INDEX waysact.idx_users_email IS 'Used to find a user''s address, perhaps
+          filtered to only the verified ones.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'puts the comment directly after the index it describes' do
+        subject.run
+        expect(subject.dump).to include(
+          "CREATE INDEX idx_users_email ON waysact.users USING btree (email);\n" \
+          "COMMENT ON INDEX waysact.idx_users_email IS 'Used to find a user''s address, perhaps\n" \
+          "filtered to only the verified ones.';\n"
+        )
+      end
+
+      it 'keeps the comment only once' do
+        subject.run
+        expect(subject.dump.scan('COMMENT ON INDEX').size).to eq(1)
+      end
+
+      it 'still places the uncommented index with its table' do
+        subject.run
+        users = subject.dump[/CREATE TABLE waysact\.users .*?(?=CREATE TABLE|\z)/m]
+        expect(users).to include('CREATE INDEX idx_users_name')
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when an index comment has no matching index' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          COMMENT ON INDEX waysact.idx_that_went_away IS 'Orphaned.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'leaves the comment alone rather than dropping it' do
+        subject.run
+        expect(subject.dump).to include("COMMENT ON INDEX waysact.idx_that_went_away IS 'Orphaned.';")
+      end
+    end
+
     context 'when sorting indexes with WITH clause on table' do
       let(:dump) do
         <<~STRUCTURE_SQL

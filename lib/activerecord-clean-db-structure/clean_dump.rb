@@ -53,6 +53,17 @@ module ActiveRecordCleanDbStructure
       \ IS\ '(?:[^']|'')*';\n
     /x
 
+    # A COMMENT ON INDEX statement with the pg_dump comment introducing it.
+    INDEX_COMMENT_STATEMENT_REGEXP = /
+      (?:^--\ Name:\ INDEX\ [^;\n]+;\ Type:\ COMMENT\n+)?
+      ^COMMENT\ ON\ INDEX\ 
+      (?:#{IDENTIFIER_REGEXP}\.)*(?<index>#{IDENTIFIER_REGEXP})
+      \ IS\ '(?:[^']|'')*';\n
+    /x
+
+    # The name of the index a CREATE INDEX statement defines.
+    INDEX_NAME_REGEXP = /^CREATE(?: UNIQUE)? INDEX (#{IDENTIFIER_REGEXP}) ON /
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -171,11 +182,13 @@ module ActiveRecordCleanDbStructure
 
       if options[:indexes_after_tables] == true
         # Extract indexes, remove comments and place them just after the respective tables
+        statements = dump.scan(INDEX_STATEMENT_REGEXP)
+        comments = take_index_comments(statements.map { |line| index_name(line) }.compact)
+
         indexes =
-          dump
-            .scan(INDEX_STATEMENT_REGEXP)
+          statements
             .group_by { |line| line[INDEX_TABLE_REGEXP, 1] }
-            .transform_values(&:join)
+            .transform_values { |lines| lines.map { |line| line + comments[index_name(line)].to_s }.join }
 
         dump.gsub!(/#{INDEX_STATEMENT_REGEXP}\n*/, '')
         dump.gsub!(INDEX_COMMENT_REGEXP, '')
@@ -218,6 +231,31 @@ module ActiveRecordCleanDbStructure
 
         [table, columns].join
       end
+    end
+
+    # Removes the COMMENT ON INDEX statements for the given indexes and returns
+    # them keyed by index name, so that each can be put back directly after the
+    # index it describes. pg_dump writes them in a block of their own, which
+    # leaves them stranded once the indexes move to their tables.
+    #
+    # A comment whose index is not in the dump is left where it is, rather than
+    # removed with nowhere to put it back.
+    def take_index_comments(index_names)
+      comments = {}
+
+      dump.gsub!(INDEX_COMMENT_STATEMENT_REGEXP) do |statement|
+        name = Regexp.last_match[:index].delete('"')
+        next statement unless index_names.include?(name)
+
+        comments[name] = statement.sub(/\A--\ Name:[^\n]*\n+/x, '')
+        ''
+      end
+
+      comments
+    end
+
+    def index_name(statement)
+      statement[INDEX_NAME_REGEXP, 1]&.delete('"')
     end
 
     # Orders the COMMENT ON COLUMN statements to match the column order.

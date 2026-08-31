@@ -17,6 +17,19 @@ module ActiveRecordCleanDbStructure
     # that running the cleaner over its own output is a no-op.
     SCHEMA_MIGRATION_VALUE_REGEXP = /^[ ,]?(\('\d{14}'\))[,;]?$/
 
+    # A single CREATE INDEX statement. The same pattern collects and removes
+    # them, so the two can never disagree and leave a duplicate behind.
+    INDEX_STATEMENT_REGEXP = /^CREATE.+INDEX.+ON.+\n/
+
+    # The pg_dump comment that precedes a CREATE INDEX statement. The index
+    # name is not restricted to word characters, because pg_dump does not
+    # restrict it either.
+    INDEX_COMMENT_REGEXP = /^-- Name: [^;\n]+; Type: INDEX\n+/
+
+    # The table a CREATE INDEX statement applies to. Taken from the ON clause,
+    # because the index name may itself contain a dot.
+    INDEX_TABLE_REGEXP = / ON (?:ONLY )?([^\s(]+)/
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -122,7 +135,7 @@ module ActiveRecordCleanDbStructure
         dump.gsub!(stats_regexp, '');
       end
       # This is mostly done to allow restoring Postgres 11 output on Postgres 10
-      dump.gsub!(/CREATE INDEX ([\w_]+) ON ONLY/, 'CREATE INDEX \\1 ON')
+      dump.gsub!(/^(CREATE(?: UNIQUE)? INDEX .+?) ON ONLY /, '\\1 ON ')
 
       if options[:order_schema_migrations_values]
         schema_migrations_cleanup
@@ -135,14 +148,14 @@ module ActiveRecordCleanDbStructure
         # Extract indexes, remove comments and place them just after the respective tables
         indexes =
           dump
-            .scan(/^CREATE.+INDEX.+ON.+\n/)
-            .group_by { |line| line.scan(/\b\w+\.\w+\b/).first }
+            .scan(INDEX_STATEMENT_REGEXP)
+            .group_by { |line| line[INDEX_TABLE_REGEXP, 1] }
             .transform_values(&:join)
 
-        dump.gsub!(/^CREATE( UNIQUE)? INDEX \"?\w+\"? ON .+\n+/, '')
-        dump.gsub!(/^-- Name: \w+; Type: INDEX\n+/, '')
+        dump.gsub!(/#{INDEX_STATEMENT_REGEXP}\n*/, '')
+        dump.gsub!(INDEX_COMMENT_REGEXP, '')
         indexes.each do |table, indexes_for_table|
-          dump.gsub!(/^(CREATE TABLE #{table}\b(:?[^;\n]*\n)+\)[^;]*;\n)/) { $1 + "\n" + indexes_for_table }
+          dump.gsub!(/^(CREATE TABLE #{Regexp.escape(table)}\b(?:[^;\n]*\n)+\)[^;]*;\n)/) { $1 + "\n" + indexes_for_table }
         end
       end
 

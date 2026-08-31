@@ -483,6 +483,119 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when sorting indexes whose names need quoting' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          --
+          -- Name: users email idx; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX "users email idx" ON waysact.users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'moves the index rather than duplicating it' do
+        subject.run
+        expect(subject.dump.scan('CREATE INDEX "users email idx"').size).to eq(1)
+      end
+
+      it 'removes the index comment' do
+        subject.run
+        expect(subject.dump).not_to include('Type: INDEX')
+      end
+    end
+
+    context 'when sorting indexes whose names contain a dot' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX "idx.foo" ON waysact.users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'keeps the index' do
+        subject.run
+        expect(subject.dump).to include('CREATE INDEX "idx.foo" ON waysact.users USING btree (email);')
+      end
+    end
+
+    context 'when sorting indexes on tables without a schema prefix' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE TABLE users (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX idx_foo ON users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'places the index after its own table only' do
+        subject.run
+        expect(subject.dump.scan('CREATE INDEX idx_foo').size).to eq(1)
+      end
+    end
+
+    context 'when a table name is a wildcard match for another' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE TABLE waysactxusers (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX idx_foo ON waysact.users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'places the index after the matching table only' do
+        subject.run
+        expect(subject.dump.scan('CREATE INDEX idx_foo').size).to eq(1)
+      end
+    end
+
+    context 'when an index is declared ON ONLY a partitioned parent' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.events (
+              id BIGSERIAL
+          )
+          PARTITION BY RANGE (id);
+
+          CREATE INDEX idx_events ON ONLY waysact.events USING btree (id);
+
+          CREATE INDEX "events idx" ON ONLY waysact.events USING btree (id);
+        STRUCTURE_SQL
+      end
+
+      it 'drops ONLY regardless of how the index name is spelled' do
+        subject.run
+        expect(subject.dump).not_to include('ON ONLY')
+      end
+    end
+
     context 'when sorting indexes with WITH clause on table' do
       let(:dump) do
         <<~STRUCTURE_SQL

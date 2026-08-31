@@ -171,6 +171,64 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when moving primary keys into the table definition' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.things (
+              id bigint NOT NULL,
+              name text
+          );
+
+          --
+          -- Name: things things_pkey; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_pkey PRIMARY KEY (id);
+        STRUCTURE_SQL
+      end
+
+      it 'inlines the primary key on the id column' do
+        subject.run
+        expect(subject.dump).to include('id BIGSERIAL PRIMARY KEY')
+      end
+
+      it 'removes the separate ADD CONSTRAINT statement' do
+        subject.run
+        expect(subject.dump).not_to include('ADD CONSTRAINT things_pkey')
+      end
+    end
+
+    context 'when moving unique constraints into the table definition' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.things (
+              id BIGSERIAL,
+              email text
+          );
+
+          --
+          -- Name: things things_email_key; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_email_key UNIQUE (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { move_unique_constraints_to_tables: true } }
+
+      it 'inlines the unique constraint' do
+        subject.run
+        expect(subject.dump).to include('CONSTRAINT things_email_key UNIQUE (email)')
+      end
+
+      it 'removes the separate ADD CONSTRAINT statement' do
+        subject.run
+        expect(subject.dump).not_to include('ALTER TABLE ONLY waysact.things')
+      end
+    end
+
     context 'when removing partitioned tables' do
       let(:dump) do
         <<~STRUCTURE_SQL

@@ -1,7 +1,44 @@
+require 'English'
 require 'digest'
 
 module ActiveRecordCleanDbStructure
   class CleanDump
+    # Raised when an INSERT INTO "schema_migrations" statement is present but
+    # holds no readable version values.
+    class NoSchemaMigrationValues < StandardError; end
+
+    # The body of the schema_migrations INSERT statement, up to and including
+    # its terminating semicolon.
+    SCHEMA_MIGRATIONS_VALUES_REGEXP =
+      /(?<=INSERT INTO "schema_migrations" \(version\) VALUES)(?<values>.+?;)\n*/m
+
+    # A single migration version, in raw pg_dump form ("('...')," per line) as
+    # well as in the form written by a previous run (",('...')" per line), so
+    # that running the cleaner over its own output is a no-op.
+    SCHEMA_MIGRATION_VALUE_REGEXP = /^[ ,]?(\('\d{14}'\))[,;]?$/
+
+    # A single CREATE INDEX statement. The same pattern collects and removes
+    # them, so the two can never disagree and leave a duplicate behind.
+    INDEX_STATEMENT_REGEXP = /^CREATE.+INDEX.+ON.+\n/
+
+    # The pg_dump comment that precedes a CREATE INDEX statement. The index
+    # name is not restricted to word characters, because pg_dump does not
+    # restrict it either.
+    INDEX_COMMENT_REGEXP = /^-- Name: [^;\n]+; Type: INDEX\n+/
+
+    # The table a CREATE INDEX statement applies to. Taken from the ON clause,
+    # because the index name may itself contain a dot.
+    INDEX_TABLE_REGEXP = / ON (?:ONLY )?([^\s(]+)/
+
+    # The opening keywords of a CREATE TABLE statement. pg_dump writes
+    # "CREATE UNLOGGED TABLE" for unlogged tables.
+    CREATE_TABLE_REGEXP = /CREATE (?:UNLOGGED )?TABLE/
+
+    # Everything pg_dump may put between the closing parenthesis of a column
+    # list and the terminating semicolon: PARTITION BY, WITH, USING, INHERITS,
+    # SERVER, TABLESPACE, and whatever a later Postgres adds.
+    TABLE_SUFFIX_REGEXP = /\n\)[^;]*;$/
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -14,8 +51,6 @@ module ActiveRecordCleanDbStructure
 
       # Remove trailing whitespace
       dump.gsub!(/[ \t]+$/, '')
-      dump.gsub!(/\A\n/, '')
-      dump.gsub!(/\n\n\z/, "\n")
 
       if options[:schemas_extensions_if_not_exists]
         dump.gsub!(/^CREATE SCHEMA (?!IF NOT EXISTS)/, 'CREATE SCHEMA IF NOT EXISTS ')
@@ -57,7 +92,8 @@ module ActiveRecordCleanDbStructure
       inherited_tables_regexp = /-- Name: ([\w_\.]+); Type: TABLE\n\n[^;]+?INHERITS \([\w_\.]+\);/m
       inherited_tables = dump.scan(inherited_tables_regexp).map(&:first)
       dump.gsub!(inherited_tables_regexp, '')
-      inherited_tables.each do |inherited_table|
+      inherited_tables.each do |inherited_table_name|
+        inherited_table = Regexp.escape(inherited_table_name)
         dump.gsub!(/ALTER TABLE ONLY ([\w_]+\.)?#{inherited_table}[^;]+;/, '')
 
         index_regexp = /CREATE INDEX ([\w_]+) ON ([\w_]+\.)?#{inherited_table}[^;]+;/m
@@ -78,8 +114,9 @@ module ActiveRecordCleanDbStructure
       partitioned_tables_regexp2 = /-- Name: ([\w_\.]+); Type: TABLE\n\n[^;]+?PARTITION OF [\w_\.]+\n[^;]+?;/m
       partitioned_tables += dump.scan(partitioned_tables_regexp2).map(&:first)
 
-      partitioned_tables.each do |partitioned_table|
-        partitioned_schema_name, partitioned_table_name_only = partitioned_table.split('.', 2)
+      partitioned_tables.each do |partitioned_table_name|
+        partitioned_table = Regexp.escape(partitioned_table_name)
+        partitioned_table_name_only = Regexp.escape(partitioned_table_name.split('.').last)
         dump.gsub!(/-- Name: #{partitioned_table_name_only}; Type: TABLE(?: ATTACH)?.*/, '')
         dump.gsub!(/CREATE TABLE #{partitioned_table} \([^;]+;/m, '')
         dump.gsub!(/ALTER TABLE ONLY ([\w_\.]+) ATTACH PARTITION #{partitioned_table}[^;]+;/m, '')
@@ -91,9 +128,9 @@ module ActiveRecordCleanDbStructure
 
         index_regexp = /CREATE (UNIQUE )?INDEX ([\w_]+) ON ([\w_]+\.)?#{partitioned_table}[^;]+;/m
         dump.scan(index_regexp).each do |m|
-          partitioned_table_index = m[1]
-          dump.gsub!(/-- Name: #{Regexp.escape(partitioned_table_index)}; Type: INDEX ATTACH.*/, '')
-          dump.gsub!(/-- Name: #{Regexp.escape(partitioned_table_index)}; Type: INDEX.*/, '')
+          partitioned_table_index = Regexp.escape(m[1])
+          dump.gsub!(/-- Name: #{partitioned_table_index}; Type: INDEX ATTACH.*/, '')
+          dump.gsub!(/-- Name: #{partitioned_table_index}; Type: INDEX.*/, '')
           dump.gsub!(/ALTER INDEX ([\w_\.]+) ATTACH PARTITION ([\w_]+\.)?#{partitioned_table_index};/, '')
         end
         dump.gsub!(index_regexp, '')
@@ -109,7 +146,7 @@ module ActiveRecordCleanDbStructure
         dump.gsub!(stats_regexp, '');
       end
       # This is mostly done to allow restoring Postgres 11 output on Postgres 10
-      dump.gsub!(/CREATE INDEX ([\w_]+) ON ONLY/, 'CREATE INDEX \\1 ON')
+      dump.gsub!(/^(CREATE(?: UNIQUE)? INDEX .+?) ON ONLY /, '\\1 ON ')
 
       if options[:order_schema_migrations_values]
         schema_migrations_cleanup
@@ -122,14 +159,14 @@ module ActiveRecordCleanDbStructure
         # Extract indexes, remove comments and place them just after the respective tables
         indexes =
           dump
-            .scan(/^CREATE.+INDEX.+ON.+\n/)
-            .group_by { |line| line.scan(/\b\w+\.\w+\b/).first }
+            .scan(INDEX_STATEMENT_REGEXP)
+            .group_by { |line| line[INDEX_TABLE_REGEXP, 1] }
             .transform_values(&:join)
 
-        dump.gsub!(/^CREATE( UNIQUE)? INDEX \"?\w+\"? ON .+\n+/, '')
-        dump.gsub!(/^-- Name: \w+; Type: INDEX\n+/, '')
+        dump.gsub!(/#{INDEX_STATEMENT_REGEXP}\n*/, '')
+        dump.gsub!(INDEX_COMMENT_REGEXP, '')
         indexes.each do |table, indexes_for_table|
-          dump.gsub!(/^(CREATE TABLE #{table}\b(:?[^;\n]*\n)+\)[^;]*;\n)/) { $1 + "\n" + indexes_for_table }
+          dump.gsub!(/^(#{CREATE_TABLE_REGEXP} #{Regexp.escape(table)}\b(?:[^;\n]*\n)+\)[^;]*;\n)/) { $1 + "\n" + indexes_for_table }
         end
       end
 
@@ -138,12 +175,12 @@ module ActiveRecordCleanDbStructure
 
       # Reduce 2+ lines of whitespace to one line of whitespace
       dump.gsub!(/\n{2,}/m, "\n\n")
+      # Removing comments leaves blank lines behind at the top of the file
+      dump.sub!(/\A\n+/, '')
       # End the file with a single end-of-line character
       dump.sub!(/\n*\z/m, "\n")
 
-      if options[:order_column_definitions] == true
-        order_column_definitions
-      end
+      dump
     end
 
     private
@@ -152,7 +189,7 @@ module ActiveRecordCleanDbStructure
     # - ignores quotes which surround column names that are equal to reserved PostgreSQL names.
     # - keeps the columns at the top and places the constraints at the bottom.
     def order_column_definitions
-      dump.gsub!(/^(?<table>CREATE TABLE .+?\(\n)(?<columns>.+?)(?=\n\)(?:\nPARTITION BY.*|(?:\nWITH \([^)]*\)))?;$)/m) do
+      dump.gsub!(/^(?<table>#{CREATE_TABLE_REGEXP} .+?\(\n)(?<columns>.+?)(?=#{TABLE_SUFFIX_REGEXP})/m) do
         table = $~[:table]
         columns =
           split_column_definitions($~[:columns])
@@ -242,8 +279,8 @@ module ActiveRecordCleanDbStructure
 
       # Adds the PRIMARY KEY property to each column for which it's statement has just been removed.
       primary_keys.each do |table, column|
-        dump.gsub!(/^(?<statement>CREATE TABLE #{table} \(.*?\s+#{column}\s+[^,\n]+)/m) do
-          "#{$LAST_MATCH_INFO[:statement].remove(/ NOT NULL\z/)} PRIMARY KEY"
+        dump.gsub!(/^(?<statement>#{CREATE_TABLE_REGEXP} #{Regexp.escape(table)} \(.*?\s+#{Regexp.escape(column)}\s+[^,\n]+)/m) do
+          "#{$LAST_MATCH_INFO[:statement].sub(/ NOT NULL\z/, '')} PRIMARY KEY"
         end
       end
     end
@@ -261,9 +298,9 @@ module ActiveRecordCleanDbStructure
 
       # Adds the UNIQUE contstraint to the table definitions.
       unique_constraints.each do |table, name, columns|
-        dump.gsub!(/^(?<statement>CREATE TABLE #{table} \(.*?\);)/m) do
+        dump.gsub!(/^#{CREATE_TABLE_REGEXP} #{Regexp.escape(table)} \(.*?#{TABLE_SUFFIX_REGEXP}/m) do |statement|
           constraint = "CONSTRAINT #{name} UNIQUE #{columns}"
-          "#{$LAST_MATCH_INFO[:statement].sub(/\n\);\z/, ",\n    #{constraint}\n);")}"
+          statement.sub(/\n\)/, ",\n    #{constraint}\n)")
         end
       end
     end
@@ -274,8 +311,21 @@ module ActiveRecordCleanDbStructure
     # - places the comma's in front of each value (except for the first)
     # - places the semicolon on a separate last line
     def schema_migrations_cleanup
-      # Read all schema_migrations values from the dump.
-      values = dump.scan(/^(\(\'\d{14}\'\))[,;]\n/).flatten.sort
+      # Read all schema_migrations values from the dump. Only the body of the
+      # INSERT statement is examined, so that values are never picked up from
+      # elsewhere in the dump.
+      body = dump[SCHEMA_MIGRATIONS_VALUES_REGEXP, :values]
+      return if body.nil?
+
+      values = body.scan(SCHEMA_MIGRATION_VALUE_REGEXP).flatten.sort
+
+      # An INSERT statement without readable values means the format changed.
+      # Writing the dump back out would drop every migration version, so stop.
+      if values.empty?
+        raise NoSchemaMigrationValues,
+              'Found a schema_migrations INSERT statement but no version ' \
+              'values in it. Refusing to write an empty version list.'
+      end
 
       if options[:order_schema_migrations_values] == :jumbled
         values.sort_by! { |v| [::Digest::SHA2.hexdigest(v[2...-2]), v].join }
@@ -284,10 +334,7 @@ module ActiveRecordCleanDbStructure
       end
 
       # Replace the schema_migrations values.
-      dump.sub!(
-        /(?<=INSERT INTO "schema_migrations" \(version\) VALUES).+;\n*/m,
-        "\n #{values.join("\n,")}\n;\n\n"
-      )
+      dump.sub!(SCHEMA_MIGRATIONS_VALUES_REGEXP, "\n #{values.join("\n,")}\n;\n\n")
     end
   end
 end

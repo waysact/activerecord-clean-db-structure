@@ -19,6 +19,66 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
 
     subject { described_class.new(dump.dup, options) }
 
+    it 'returns the cleaned dump' do
+      expect(subject.run).to eq(subject.dump)
+    end
+
+    context 'when cleanup is disabled' do
+      let(:options) { { enabled: false } }
+
+      it 'returns the dump unchanged' do
+        expect(subject.run).to eq(dump)
+      end
+    end
+
+    context 'when run over its own output' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          --
+          -- Name: things; Type: TABLE; Schema: waysact; Owner: -
+          --
+
+          CREATE TABLE waysact.things (
+              id bigint NOT NULL,
+              zebra text,
+              alpha text
+          );
+
+          --
+          -- Name: things things_pkey; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_pkey PRIMARY KEY (id);
+
+          --
+          -- Name: idx_things_alpha; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX idx_things_alpha ON waysact.things USING btree (alpha);
+
+          INSERT INTO "schema_migrations" (version) VALUES
+          ('20220309184009'),
+          ('20220202235304');
+        STRUCTURE_SQL
+      end
+
+      let(:options) do
+        {
+          indexes_after_tables: true,
+          order_column_definitions: true,
+          order_schema_migrations_values: true
+        }
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
     context 'when ordering schema migrations' do
       let(:options) { { order_schema_migrations_values: true } }
       it 'works' do
@@ -31,6 +91,43 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           ,('20220309184009')
           ;
         STRUCTURE_SQL
+      end
+    end
+
+    context 'when re-running over already cleaned schema migrations' do
+      let(:options) { { order_schema_migrations_values: true } }
+
+      it 'keeps every migration version' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when the schema_migrations INSERT has no values' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          INSERT INTO "schema_migrations" (version) VALUES
+          ;
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_schema_migrations_values: true } }
+
+      it 'raises instead of writing an empty list' do
+        expect { subject.run }.to raise_error(described_class::NoSchemaMigrationValues)
+      end
+    end
+
+    context 'when there is no schema_migrations INSERT' do
+      let(:dump) { "CREATE TABLE waysact.things (\n    id BIGSERIAL\n);\n" }
+
+      let(:options) { { order_schema_migrations_values: true } }
+
+      it 'leaves the dump alone' do
+        subject.run
+        expect(subject.dump).to eq(dump)
       end
     end
 
@@ -134,11 +231,94 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when moving primary keys into the table definition' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.things (
+              id bigint NOT NULL,
+              name text
+          );
+
+          --
+          -- Name: things things_pkey; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_pkey PRIMARY KEY (id);
+        STRUCTURE_SQL
+      end
+
+      it 'inlines the primary key on the id column' do
+        subject.run
+        expect(subject.dump).to include('id BIGSERIAL PRIMARY KEY')
+      end
+
+      it 'removes the separate ADD CONSTRAINT statement' do
+        subject.run
+        expect(subject.dump).not_to include('ADD CONSTRAINT things_pkey')
+      end
+    end
+
+    context 'when moving unique constraints into the table definition' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.things (
+              id BIGSERIAL,
+              email text
+          );
+
+          --
+          -- Name: things things_email_key; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_email_key UNIQUE (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { move_unique_constraints_to_tables: true } }
+
+      it 'inlines the unique constraint' do
+        subject.run
+        expect(subject.dump).to include('CONSTRAINT things_email_key UNIQUE (email)')
+      end
+
+      it 'removes the separate ADD CONSTRAINT statement' do
+        subject.run
+        expect(subject.dump).not_to include('ALTER TABLE ONLY waysact.things')
+      end
+    end
+
+    context 'when moving unique constraints into a table with a WITH clause' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.things (
+              id BIGSERIAL,
+              email text
+          )
+          WITH (fillfactor='85');
+
+          --
+          -- Name: things things_email_key; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_email_key UNIQUE (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { move_unique_constraints_to_tables: true } }
+
+      it 'keeps the unique constraint' do
+        expect(subject.tap(&:run).dump).to include('CONSTRAINT things_email_key UNIQUE (email)')
+      end
+    end
+
     context 'when removing partitioned tables' do
       let(:dump) do
         <<~STRUCTURE_SQL
           --
-          -- Name: events; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: events; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.events (
@@ -147,7 +327,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           PARTITION BY RANGE (id);
 
           --
-          -- Name: events_p2024; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: events_p2024; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.events_p2024 (
@@ -157,7 +337,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           ALTER TABLE ONLY waysact.events ATTACH PARTITION waysact.events_p2024 FOR VALUES FROM (1) TO (100);
 
           --
-          -- Name: idx_events_p2024_id; Type: INDEX; Schema: waysact; Owner: waysact
+          -- Name: idx_events_p2024_id; Type: INDEX; Schema: waysact; Owner: -
           --
 
           CREATE INDEX idx_events_p2024_id ON waysact.events_p2024 USING btree (id);
@@ -165,23 +345,23 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           ALTER TABLE waysact.events_p2024 OWNER TO waysact;
 
           --
-          -- Name: events_p2024 events_p2024_pkey; Type: CONSTRAINT; Schema: waysact; Owner: waysact
+          -- Name: events_p2024 events_p2024_pkey; Type: CONSTRAINT; Schema: waysact; Owner: -
           --
 
           --
-          -- Name: events_p2024_pkey; Type: INDEX ATTACH; Schema: waysact; Owner: waysact
+          -- Name: events_p2024_pkey; Type: INDEX ATTACH; Schema: waysact; Owner: -
           --
 
           ALTER INDEX waysact.events_pkey ATTACH PARTITION waysact.events_p2024_pkey;
 
           --
-          -- Name: TABLE events_p2024; Type: COMMENT; Schema: waysact; Owner: waysact
+          -- Name: TABLE events_p2024; Type: COMMENT; Schema: waysact; Owner: -
           --
 
           COMMENT ON TABLE waysact.events_p2024 IS 'A partition for 2024 data';
 
           --
-          -- Name: events_p2024_stats; Type: STATISTICS; Schema: waysact; Owner: waysact
+          -- Name: events_p2024_stats; Type: STATISTICS; Schema: waysact; Owner: -
           --
 
           CREATE STATISTICS waysact.events_p2024_stats ON id FROM waysact.events_p2024;
@@ -205,7 +385,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       let(:dump) do
         <<~STRUCTURE_SQL
           --
-          -- Name: parent; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: parent; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.parent (
@@ -213,7 +393,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           );
 
           --
-          -- Name: child; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: child; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.child (
@@ -222,7 +402,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           INHERITS (waysact.parent);
 
           --
-          -- Name: idx_child_id; Type: INDEX; Schema: waysact; Owner: waysact
+          -- Name: idx_child_id; Type: INDEX; Schema: waysact; Owner: -
           --
 
           CREATE INDEX idx_child_id ON waysact.child USING btree (id);
@@ -232,6 +412,16 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       it 'does not leave orphaned comment suffixes as bare SQL' do
         subject.run
         expect(subject.dump).not_to match(/^; Schema:/)
+      end
+
+      it 'removes the inherited table and its index' do
+        subject.run
+        expect(subject.dump).not_to include('child')
+      end
+
+      it 'keeps the parent table' do
+        subject.run
+        expect(subject.dump).to include('CREATE TABLE waysact.parent')
       end
     end
 
@@ -292,6 +482,69 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when ordering column definitions of a table with a USING clause' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.aaa (
+              zebra text,
+              alpha text
+          )
+          USING heap;
+
+          CREATE TABLE waysact.bbb (
+              yankee text,
+              bravo text
+          );
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'does not move columns between tables' do
+        other_block = subject.tap(&:run).dump[/CREATE TABLE waysact\.bbb \(.*?\);/m]
+        expect(other_block).not_to include('zebra')
+      end
+
+      it 'sorts the columns of the table itself' do
+        expect(subject.tap(&:run).dump).to include("    alpha text,\n    zebra text\n)\nUSING heap;")
+      end
+    end
+
+    context 'when ordering column definitions of an unlogged table' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE UNLOGGED TABLE waysact.cache (
+              zebra text,
+              alpha text
+          );
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'sorts the columns' do
+        expect(subject.tap(&:run).dump).to include("    alpha text,\n    zebra text\n);")
+      end
+    end
+
+    context 'when sorting indexes of an unlogged table' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE UNLOGGED TABLE waysact.cache (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX idx_cache ON waysact.cache USING btree (id);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'keeps the index' do
+        expect(subject.tap(&:run).dump).to include('CREATE INDEX idx_cache ON waysact.cache USING btree (id);')
+      end
+    end
+
     context 'when sorting indexes' do
       let(:dump) do
         <<~STRUCTURE_SQL
@@ -325,6 +578,119 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
               id BIGSERIAL
           );
         STRUCTURE_SQL
+      end
+    end
+
+    context 'when sorting indexes whose names need quoting' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          --
+          -- Name: users email idx; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX "users email idx" ON waysact.users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'moves the index rather than duplicating it' do
+        subject.run
+        expect(subject.dump.scan('CREATE INDEX "users email idx"').size).to eq(1)
+      end
+
+      it 'removes the index comment' do
+        subject.run
+        expect(subject.dump).not_to include('Type: INDEX')
+      end
+    end
+
+    context 'when sorting indexes whose names contain a dot' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX "idx.foo" ON waysact.users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'keeps the index' do
+        subject.run
+        expect(subject.dump).to include('CREATE INDEX "idx.foo" ON waysact.users USING btree (email);')
+      end
+    end
+
+    context 'when sorting indexes on tables without a schema prefix' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE TABLE users (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX idx_foo ON users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'places the index after its own table only' do
+        subject.run
+        expect(subject.dump.scan('CREATE INDEX idx_foo').size).to eq(1)
+      end
+    end
+
+    context 'when a table name is a wildcard match for another' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE TABLE waysactxusers (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX idx_foo ON waysact.users USING btree (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'places the index after the matching table only' do
+        subject.run
+        expect(subject.dump.scan('CREATE INDEX idx_foo').size).to eq(1)
+      end
+    end
+
+    context 'when an index is declared ON ONLY a partitioned parent' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.events (
+              id BIGSERIAL
+          )
+          PARTITION BY RANGE (id);
+
+          CREATE INDEX idx_events ON ONLY waysact.events USING btree (id);
+
+          CREATE INDEX "events idx" ON ONLY waysact.events USING btree (id);
+        STRUCTURE_SQL
+      end
+
+      it 'drops ONLY regardless of how the index name is spelled' do
+        subject.run
+        expect(subject.dump).not_to include('ON ONLY')
       end
     end
 

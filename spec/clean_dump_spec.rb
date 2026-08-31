@@ -289,11 +289,36 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when moving unique constraints into a table with a WITH clause' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.things (
+              id BIGSERIAL,
+              email text
+          )
+          WITH (fillfactor='85');
+
+          --
+          -- Name: things things_email_key; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_email_key UNIQUE (email);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { move_unique_constraints_to_tables: true } }
+
+      it 'keeps the unique constraint' do
+        expect(subject.tap(&:run).dump).to include('CONSTRAINT things_email_key UNIQUE (email)')
+      end
+    end
+
     context 'when removing partitioned tables' do
       let(:dump) do
         <<~STRUCTURE_SQL
           --
-          -- Name: events; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: events; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.events (
@@ -302,7 +327,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           PARTITION BY RANGE (id);
 
           --
-          -- Name: events_p2024; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: events_p2024; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.events_p2024 (
@@ -312,7 +337,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           ALTER TABLE ONLY waysact.events ATTACH PARTITION waysact.events_p2024 FOR VALUES FROM (1) TO (100);
 
           --
-          -- Name: idx_events_p2024_id; Type: INDEX; Schema: waysact; Owner: waysact
+          -- Name: idx_events_p2024_id; Type: INDEX; Schema: waysact; Owner: -
           --
 
           CREATE INDEX idx_events_p2024_id ON waysact.events_p2024 USING btree (id);
@@ -320,23 +345,23 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           ALTER TABLE waysact.events_p2024 OWNER TO waysact;
 
           --
-          -- Name: events_p2024 events_p2024_pkey; Type: CONSTRAINT; Schema: waysact; Owner: waysact
+          -- Name: events_p2024 events_p2024_pkey; Type: CONSTRAINT; Schema: waysact; Owner: -
           --
 
           --
-          -- Name: events_p2024_pkey; Type: INDEX ATTACH; Schema: waysact; Owner: waysact
+          -- Name: events_p2024_pkey; Type: INDEX ATTACH; Schema: waysact; Owner: -
           --
 
           ALTER INDEX waysact.events_pkey ATTACH PARTITION waysact.events_p2024_pkey;
 
           --
-          -- Name: TABLE events_p2024; Type: COMMENT; Schema: waysact; Owner: waysact
+          -- Name: TABLE events_p2024; Type: COMMENT; Schema: waysact; Owner: -
           --
 
           COMMENT ON TABLE waysact.events_p2024 IS 'A partition for 2024 data';
 
           --
-          -- Name: events_p2024_stats; Type: STATISTICS; Schema: waysact; Owner: waysact
+          -- Name: events_p2024_stats; Type: STATISTICS; Schema: waysact; Owner: -
           --
 
           CREATE STATISTICS waysact.events_p2024_stats ON id FROM waysact.events_p2024;
@@ -360,7 +385,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       let(:dump) do
         <<~STRUCTURE_SQL
           --
-          -- Name: parent; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: parent; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.parent (
@@ -368,7 +393,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           );
 
           --
-          -- Name: child; Type: TABLE; Schema: waysact; Owner: waysact
+          -- Name: child; Type: TABLE; Schema: waysact; Owner: -
           --
 
           CREATE TABLE waysact.child (
@@ -377,7 +402,7 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
           INHERITS (waysact.parent);
 
           --
-          -- Name: idx_child_id; Type: INDEX; Schema: waysact; Owner: waysact
+          -- Name: idx_child_id; Type: INDEX; Schema: waysact; Owner: -
           --
 
           CREATE INDEX idx_child_id ON waysact.child USING btree (id);
@@ -387,6 +412,16 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       it 'does not leave orphaned comment suffixes as bare SQL' do
         subject.run
         expect(subject.dump).not_to match(/^; Schema:/)
+      end
+
+      it 'removes the inherited table and its index' do
+        subject.run
+        expect(subject.dump).not_to include('child')
+      end
+
+      it 'keeps the parent table' do
+        subject.run
+        expect(subject.dump).to include('CREATE TABLE waysact.parent')
       end
     end
 
@@ -444,6 +479,69 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
         # name must remain inside call_events, not move to other
         other_block = subject.dump[/CREATE TABLE waysact\.other \(.*?\);/m]
         expect(other_block).not_to include('name')
+      end
+    end
+
+    context 'when ordering column definitions of a table with a USING clause' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.aaa (
+              zebra text,
+              alpha text
+          )
+          USING heap;
+
+          CREATE TABLE waysact.bbb (
+              yankee text,
+              bravo text
+          );
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'does not move columns between tables' do
+        other_block = subject.tap(&:run).dump[/CREATE TABLE waysact\.bbb \(.*?\);/m]
+        expect(other_block).not_to include('zebra')
+      end
+
+      it 'sorts the columns of the table itself' do
+        expect(subject.tap(&:run).dump).to include("    alpha text,\n    zebra text\n)\nUSING heap;")
+      end
+    end
+
+    context 'when ordering column definitions of an unlogged table' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE UNLOGGED TABLE waysact.cache (
+              zebra text,
+              alpha text
+          );
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'sorts the columns' do
+        expect(subject.tap(&:run).dump).to include("    alpha text,\n    zebra text\n);")
+      end
+    end
+
+    context 'when sorting indexes of an unlogged table' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE UNLOGGED TABLE waysact.cache (
+              id BIGSERIAL
+          );
+
+          CREATE INDEX idx_cache ON waysact.cache USING btree (id);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'keeps the index' do
+        expect(subject.tap(&:run).dump).to include('CREATE INDEX idx_cache ON waysact.cache USING btree (id);')
       end
     end
 

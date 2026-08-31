@@ -30,6 +30,15 @@ module ActiveRecordCleanDbStructure
     # because the index name may itself contain a dot.
     INDEX_TABLE_REGEXP = / ON (?:ONLY )?([^\s(]+)/
 
+    # The opening keywords of a CREATE TABLE statement. pg_dump writes
+    # "CREATE UNLOGGED TABLE" for unlogged tables.
+    CREATE_TABLE_REGEXP = /CREATE (?:UNLOGGED )?TABLE/
+
+    # Everything pg_dump may put between the closing parenthesis of a column
+    # list and the terminating semicolon: PARTITION BY, WITH, USING, INHERITS,
+    # SERVER, TABLESPACE, and whatever a later Postgres adds.
+    TABLE_SUFFIX_REGEXP = /\n\)[^;]*;$/
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -83,7 +92,8 @@ module ActiveRecordCleanDbStructure
       inherited_tables_regexp = /-- Name: ([\w_\.]+); Type: TABLE\n\n[^;]+?INHERITS \([\w_\.]+\);/m
       inherited_tables = dump.scan(inherited_tables_regexp).map(&:first)
       dump.gsub!(inherited_tables_regexp, '')
-      inherited_tables.each do |inherited_table|
+      inherited_tables.each do |inherited_table_name|
+        inherited_table = Regexp.escape(inherited_table_name)
         dump.gsub!(/ALTER TABLE ONLY ([\w_]+\.)?#{inherited_table}[^;]+;/, '')
 
         index_regexp = /CREATE INDEX ([\w_]+) ON ([\w_]+\.)?#{inherited_table}[^;]+;/m
@@ -104,8 +114,9 @@ module ActiveRecordCleanDbStructure
       partitioned_tables_regexp2 = /-- Name: ([\w_\.]+); Type: TABLE\n\n[^;]+?PARTITION OF [\w_\.]+\n[^;]+?;/m
       partitioned_tables += dump.scan(partitioned_tables_regexp2).map(&:first)
 
-      partitioned_tables.each do |partitioned_table|
-        partitioned_schema_name, partitioned_table_name_only = partitioned_table.split('.', 2)
+      partitioned_tables.each do |partitioned_table_name|
+        partitioned_table = Regexp.escape(partitioned_table_name)
+        partitioned_table_name_only = Regexp.escape(partitioned_table_name.split('.').last)
         dump.gsub!(/-- Name: #{partitioned_table_name_only}; Type: TABLE(?: ATTACH)?.*/, '')
         dump.gsub!(/CREATE TABLE #{partitioned_table} \([^;]+;/m, '')
         dump.gsub!(/ALTER TABLE ONLY ([\w_\.]+) ATTACH PARTITION #{partitioned_table}[^;]+;/m, '')
@@ -117,9 +128,9 @@ module ActiveRecordCleanDbStructure
 
         index_regexp = /CREATE (UNIQUE )?INDEX ([\w_]+) ON ([\w_]+\.)?#{partitioned_table}[^;]+;/m
         dump.scan(index_regexp).each do |m|
-          partitioned_table_index = m[1]
-          dump.gsub!(/-- Name: #{Regexp.escape(partitioned_table_index)}; Type: INDEX ATTACH.*/, '')
-          dump.gsub!(/-- Name: #{Regexp.escape(partitioned_table_index)}; Type: INDEX.*/, '')
+          partitioned_table_index = Regexp.escape(m[1])
+          dump.gsub!(/-- Name: #{partitioned_table_index}; Type: INDEX ATTACH.*/, '')
+          dump.gsub!(/-- Name: #{partitioned_table_index}; Type: INDEX.*/, '')
           dump.gsub!(/ALTER INDEX ([\w_\.]+) ATTACH PARTITION ([\w_]+\.)?#{partitioned_table_index};/, '')
         end
         dump.gsub!(index_regexp, '')
@@ -155,7 +166,7 @@ module ActiveRecordCleanDbStructure
         dump.gsub!(/#{INDEX_STATEMENT_REGEXP}\n*/, '')
         dump.gsub!(INDEX_COMMENT_REGEXP, '')
         indexes.each do |table, indexes_for_table|
-          dump.gsub!(/^(CREATE TABLE #{Regexp.escape(table)}\b(?:[^;\n]*\n)+\)[^;]*;\n)/) { $1 + "\n" + indexes_for_table }
+          dump.gsub!(/^(#{CREATE_TABLE_REGEXP} #{Regexp.escape(table)}\b(?:[^;\n]*\n)+\)[^;]*;\n)/) { $1 + "\n" + indexes_for_table }
         end
       end
 
@@ -178,7 +189,7 @@ module ActiveRecordCleanDbStructure
     # - ignores quotes which surround column names that are equal to reserved PostgreSQL names.
     # - keeps the columns at the top and places the constraints at the bottom.
     def order_column_definitions
-      dump.gsub!(/^(?<table>CREATE TABLE .+?\(\n)(?<columns>.+?)(?=\n\)(?:\nPARTITION BY.*|(?:\nWITH \([^)]*\)))?;$)/m) do
+      dump.gsub!(/^(?<table>#{CREATE_TABLE_REGEXP} .+?\(\n)(?<columns>.+?)(?=#{TABLE_SUFFIX_REGEXP})/m) do
         table = $~[:table]
         columns =
           split_column_definitions($~[:columns])
@@ -268,7 +279,7 @@ module ActiveRecordCleanDbStructure
 
       # Adds the PRIMARY KEY property to each column for which it's statement has just been removed.
       primary_keys.each do |table, column|
-        dump.gsub!(/^(?<statement>CREATE TABLE #{table} \(.*?\s+#{column}\s+[^,\n]+)/m) do
+        dump.gsub!(/^(?<statement>#{CREATE_TABLE_REGEXP} #{Regexp.escape(table)} \(.*?\s+#{Regexp.escape(column)}\s+[^,\n]+)/m) do
           "#{$LAST_MATCH_INFO[:statement].sub(/ NOT NULL\z/, '')} PRIMARY KEY"
         end
       end
@@ -287,9 +298,9 @@ module ActiveRecordCleanDbStructure
 
       # Adds the UNIQUE contstraint to the table definitions.
       unique_constraints.each do |table, name, columns|
-        dump.gsub!(/^(?<statement>CREATE TABLE #{table} \(.*?\);)/m) do
+        dump.gsub!(/^#{CREATE_TABLE_REGEXP} #{Regexp.escape(table)} \(.*?#{TABLE_SUFFIX_REGEXP}/m) do |statement|
           constraint = "CONSTRAINT #{name} UNIQUE #{columns}"
-          "#{$LAST_MATCH_INFO[:statement].sub(/\n\);\z/, ",\n    #{constraint}\n);")}"
+          statement.sub(/\n\)/, ",\n    #{constraint}\n)")
         end
       end
     end

@@ -545,6 +545,125 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when ordering column definitions of a table with comments' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              zebra text,
+              alpha text,
+              "timestamp" timestamp without time zone
+          );
+
+          --
+          -- Name: COLUMN call_events.zebra; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON COLUMN waysact.call_events.zebra IS 'The zebra.';
+
+          --
+          -- Name: COLUMN call_events."timestamp"; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON COLUMN waysact.call_events."timestamp" IS 'The timestamp.';
+
+          --
+          -- Name: COLUMN call_events.alpha; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON COLUMN waysact.call_events.alpha IS 'The alpha.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'orders the comments the same way as the columns' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN \S+\.(\S+) IS/).flatten
+        expect(commented).to eq(['alpha', '"timestamp"', 'zebra'])
+      end
+
+      it 'keeps each comment with its own column' do
+        subject.run
+        expect(subject.dump).to include(%{COMMENT ON COLUMN waysact.call_events.alpha IS 'The alpha.';})
+        expect(subject.dump).to include(%{COMMENT ON COLUMN waysact.call_events."timestamp" IS 'The timestamp.';})
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when a column comment spans several lines' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              zebra text,
+              alpha text
+          );
+
+          COMMENT ON COLUMN waysact.call_events.zebra IS 'The time at which it happened.
+          This is distinct from received_at, and it isn''t always set.';
+
+          COMMENT ON COLUMN waysact.call_events.alpha IS 'The alpha.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'moves the whole statement' do
+        subject.run
+        expect(subject.dump).to include(
+          "COMMENT ON COLUMN waysact.call_events.zebra IS 'The time at which it happened.\n" \
+          "This is distinct from received_at, and it isn''t always set.';"
+        )
+      end
+
+      it 'still sorts it after the alpha comment' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN \S+\.(\S+) IS/).flatten
+        expect(commented).to eq(%w[alpha zebra])
+      end
+    end
+
+    context 'when two tables both have column comments' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          COMMENT ON COLUMN waysact.aaa.zebra IS 'aaa zebra.';
+
+          COMMENT ON COLUMN waysact.aaa.alpha IS 'aaa alpha.';
+
+          COMMENT ON COLUMN waysact.bbb.yankee IS 'bbb yankee.';
+
+          COMMENT ON COLUMN waysact.bbb.bravo IS 'bbb bravo.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'sorts within each table without mixing them' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN (\S+) IS/).flatten
+        expect(commented).to eq(
+          %w[waysact.aaa.alpha waysact.aaa.zebra waysact.bbb.bravo waysact.bbb.yankee]
+        )
+      end
+    end
+
+    context 'when column definitions are not ordered' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          COMMENT ON COLUMN waysact.aaa.zebra IS 'The zebra.';
+
+          COMMENT ON COLUMN waysact.aaa.alpha IS 'The alpha.';
+        STRUCTURE_SQL
+      end
+
+      it 'leaves the comments in the order pg_dump wrote them' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN \S+\.(\S+) IS/).flatten
+        expect(commented).to eq(%w[zebra alpha])
+      end
+    end
+
     context 'when sorting indexes' do
       let(:dump) do
         <<~STRUCTURE_SQL

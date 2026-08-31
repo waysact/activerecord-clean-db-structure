@@ -39,6 +39,20 @@ module ActiveRecordCleanDbStructure
     # SERVER, TABLESPACE, and whatever a later Postgres adds.
     TABLE_SUFFIX_REGEXP = /\n\)[^;]*;$/
 
+    # A single SQL identifier, quoted when it is a reserved word.
+    IDENTIFIER_REGEXP = /(?:"[^"]*"|\w+)/
+
+    # A COMMENT ON COLUMN statement with the pg_dump comment introducing it.
+    # The body is one quoted string, which may span lines and may contain
+    # doubled quotes.
+    COLUMN_COMMENT_REGEXP = /
+      (?:^--\ Name:\ COLUMN\ [^;\n]+;\ Type:\ COMMENT\n+)?
+      ^COMMENT\ ON\ COLUMN\ 
+      (?<table>#{IDENTIFIER_REGEXP}(?:\.#{IDENTIFIER_REGEXP})*)
+      \.(?<column>#{IDENTIFIER_REGEXP})
+      \ IS\ '(?:[^']|'')*';\n
+    /x
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -171,7 +185,11 @@ module ActiveRecordCleanDbStructure
       end
 
       move_unique_constraints if options[:move_unique_constraints_to_tables] == true
-      order_column_definitions if options[:order_column_definitions] == true
+
+      if options[:order_column_definitions] == true
+        order_column_definitions
+        order_column_comments
+      end
 
       # Reduce 2+ lines of whitespace to one line of whitespace
       dump.gsub!(/\n{2,}/m, "\n\n")
@@ -199,6 +217,27 @@ module ActiveRecordCleanDbStructure
           .join(",\n")
 
         [table, columns].join
+      end
+    end
+
+    # Orders the COMMENT ON COLUMN statements to match the column order.
+    #
+    # pg_dump writes them in attnum order, which is the order the columns were
+    # added to the source database. Sorting the column definitions but not the
+    # comments leaves the file internally inconsistent, and that only shows up
+    # after a round trip: loading the file creates the columns in sorted order,
+    # so the next dump writes the comments sorted too, and every commented
+    # table produces a diff.
+    def order_column_comments
+      dump.gsub!(/(?:#{COLUMN_COMMENT_REGEXP}\n*)+/) do |run|
+        comments = []
+        run.scan(COLUMN_COMMENT_REGEXP) { comments << Regexp.last_match }
+
+        comments
+          .chunk_while { |a, b| a[:table] == b[:table] }
+          .flat_map { |table_comments| table_comments.sort_by { |c| c[:column].delete('"') } }
+          .map { |c| c[0] }
+          .join("\n") + "\n"
       end
     end
 

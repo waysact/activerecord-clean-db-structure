@@ -17,6 +17,7 @@ Gem::Specification.new do |s|
 
   s.add_dependency('activerecord', '>= 4.2')
 
-  s.add_development_dependency 'rake', '~> 0'
+  s.add_development_dependency 'railties', '>= 6.1'
+  s.add_development_dependency 'rake', '>= 13'
   s.add_development_dependency 'rspec', '~> 3'
 end

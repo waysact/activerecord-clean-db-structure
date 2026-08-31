@@ -29,8 +29,6 @@ module ActiveRecordCleanDbStructure
 
       # Remove trailing whitespace
       dump.gsub!(/[ \t]+$/, '')
-      dump.gsub!(/\A\n/, '')
-      dump.gsub!(/\n\n\z/, "\n")
 
       if options[:schemas_extensions_if_not_exists]
         dump.gsub!(/^CREATE SCHEMA (?!IF NOT EXISTS)/, 'CREATE SCHEMA IF NOT EXISTS ')
@@ -153,12 +151,12 @@ module ActiveRecordCleanDbStructure
 
       # Reduce 2+ lines of whitespace to one line of whitespace
       dump.gsub!(/\n{2,}/m, "\n\n")
+      # Removing comments leaves blank lines behind at the top of the file
+      dump.sub!(/\A\n+/, '')
       # End the file with a single end-of-line character
       dump.sub!(/\n*\z/m, "\n")
 
-      if options[:order_column_definitions] == true
-        order_column_definitions
-      end
+      dump
     end
 
     private

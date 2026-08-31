@@ -19,6 +19,66 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
 
     subject { described_class.new(dump.dup, options) }
 
+    it 'returns the cleaned dump' do
+      expect(subject.run).to eq(subject.dump)
+    end
+
+    context 'when cleanup is disabled' do
+      let(:options) { { enabled: false } }
+
+      it 'returns the dump unchanged' do
+        expect(subject.run).to eq(dump)
+      end
+    end
+
+    context 'when run over its own output' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          --
+          -- Name: things; Type: TABLE; Schema: waysact; Owner: -
+          --
+
+          CREATE TABLE waysact.things (
+              id bigint NOT NULL,
+              zebra text,
+              alpha text
+          );
+
+          --
+          -- Name: things things_pkey; Type: CONSTRAINT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.things
+              ADD CONSTRAINT things_pkey PRIMARY KEY (id);
+
+          --
+          -- Name: idx_things_alpha; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX idx_things_alpha ON waysact.things USING btree (alpha);
+
+          INSERT INTO "schema_migrations" (version) VALUES
+          ('20220309184009'),
+          ('20220202235304');
+        STRUCTURE_SQL
+      end
+
+      let(:options) do
+        {
+          indexes_after_tables: true,
+          order_column_definitions: true,
+          order_schema_migrations_values: true
+        }
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
     context 'when ordering schema migrations' do
       let(:options) { { order_schema_migrations_values: true } }
       it 'works' do

@@ -2,6 +2,20 @@ require 'digest'
 
 module ActiveRecordCleanDbStructure
   class CleanDump
+    # Raised when an INSERT INTO "schema_migrations" statement is present but
+    # holds no readable version values.
+    class NoSchemaMigrationValues < StandardError; end
+
+    # The body of the schema_migrations INSERT statement, up to and including
+    # its terminating semicolon.
+    SCHEMA_MIGRATIONS_VALUES_REGEXP =
+      /(?<=INSERT INTO "schema_migrations" \(version\) VALUES)(?<values>.+?;)\n*/m
+
+    # A single migration version, in raw pg_dump form ("('...')," per line) as
+    # well as in the form written by a previous run (",('...')" per line), so
+    # that running the cleaner over its own output is a no-op.
+    SCHEMA_MIGRATION_VALUE_REGEXP = /^[ ,]?(\('\d{14}'\))[,;]?$/
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -274,8 +288,21 @@ module ActiveRecordCleanDbStructure
     # - places the comma's in front of each value (except for the first)
     # - places the semicolon on a separate last line
     def schema_migrations_cleanup
-      # Read all schema_migrations values from the dump.
-      values = dump.scan(/^(\(\'\d{14}\'\))[,;]\n/).flatten.sort
+      # Read all schema_migrations values from the dump. Only the body of the
+      # INSERT statement is examined, so that values are never picked up from
+      # elsewhere in the dump.
+      body = dump[SCHEMA_MIGRATIONS_VALUES_REGEXP, :values]
+      return if body.nil?
+
+      values = body.scan(SCHEMA_MIGRATION_VALUE_REGEXP).flatten.sort
+
+      # An INSERT statement without readable values means the format changed.
+      # Writing the dump back out would drop every migration version, so stop.
+      if values.empty?
+        raise NoSchemaMigrationValues,
+              'Found a schema_migrations INSERT statement but no version ' \
+              'values in it. Refusing to write an empty version list.'
+      end
 
       if options[:order_schema_migrations_values] == :jumbled
         values.sort_by! { |v| [::Digest::SHA2.hexdigest(v[2...-2]), v].join }
@@ -284,10 +311,7 @@ module ActiveRecordCleanDbStructure
       end
 
       # Replace the schema_migrations values.
-      dump.sub!(
-        /(?<=INSERT INTO "schema_migrations" \(version\) VALUES).+;\n*/m,
-        "\n #{values.join("\n,")}\n;\n\n"
-      )
+      dump.sub!(SCHEMA_MIGRATIONS_VALUES_REGEXP, "\n #{values.join("\n,")}\n;\n\n")
     end
   end
 end

@@ -34,6 +34,43 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when re-running over already cleaned schema migrations' do
+      let(:options) { { order_schema_migrations_values: true } }
+
+      it 'keeps every migration version' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when the schema_migrations INSERT has no values' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          INSERT INTO "schema_migrations" (version) VALUES
+          ;
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_schema_migrations_values: true } }
+
+      it 'raises instead of writing an empty list' do
+        expect { subject.run }.to raise_error(described_class::NoSchemaMigrationValues)
+      end
+    end
+
+    context 'when there is no schema_migrations INSERT' do
+      let(:dump) { "CREATE TABLE waysact.things (\n    id BIGSERIAL\n);\n" }
+
+      let(:options) { { order_schema_migrations_values: true } }
+
+      it 'leaves the dump alone' do
+        subject.run
+        expect(subject.dump).to eq(dump)
+      end
+    end
+
     context 'when jumbling schema migrations' do
       let(:options) { { order_schema_migrations_values: :jumbled } }
       it 'works' do

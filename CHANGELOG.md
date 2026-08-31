@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+* Order the `COMMENT ON COLUMN` statements with the column definitions when
+  `order_column_definitions` is enabled, so that the file stays consistent with
+  itself and survives a round trip through the database
+* Move each `COMMENT ON INDEX` statement to its index when `indexes_after_tables`
+  is enabled, rather than leaving it stranded in the block pg_dump wrote it in
+* Order the per-column `ALTER TABLE` statements (`SET DEFAULT`, `SET STATISTICS`,
+  `SET STORAGE`) with the column definitions as well. pg_dump writes them in
+  attnum order, so they had the same round trip problem as the column comments
+
 * Fix `order_schema_migrations_values` deleting every migration version when the
   cleaner runs over its own output. The reader now accepts both the raw pg_dump
   format and the format the cleaner writes, and raises `NoSchemaMigrationValues`

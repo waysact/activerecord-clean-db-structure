@@ -39,6 +39,42 @@ module ActiveRecordCleanDbStructure
     # SERVER, TABLESPACE, and whatever a later Postgres adds.
     TABLE_SUFFIX_REGEXP = /\n\)[^;]*;$/
 
+    # A single SQL identifier, quoted when it is a reserved word.
+    IDENTIFIER_REGEXP = /(?:"[^"]*"|\w+)/
+
+    # A COMMENT ON COLUMN statement with the pg_dump comment introducing it.
+    # The body is one quoted string, which may span lines and may contain
+    # doubled quotes.
+    COLUMN_COMMENT_REGEXP = /
+      (?:^--\ Name:\ COLUMN\ [^;\n]+;\ Type:\ COMMENT\n+)?
+      ^COMMENT\ ON\ COLUMN\ 
+      (?<table>#{IDENTIFIER_REGEXP}(?:\.#{IDENTIFIER_REGEXP})*)
+      \.(?<column>#{IDENTIFIER_REGEXP})
+      \ IS\ '(?:[^']|'')*';\n
+    /x
+
+    # A COMMENT ON INDEX statement with the pg_dump comment introducing it.
+    INDEX_COMMENT_STATEMENT_REGEXP = /
+      (?:^--\ Name:\ INDEX\ [^;\n]+;\ Type:\ COMMENT\n+)?
+      ^COMMENT\ ON\ INDEX\ 
+      (?:#{IDENTIFIER_REGEXP}\.)*(?<index>#{IDENTIFIER_REGEXP})
+      \ IS\ '(?:[^']|'')*';\n
+    /x
+
+    # The name of the index a CREATE INDEX statement defines.
+    INDEX_NAME_REGEXP = /^CREATE(?: UNIQUE)? INDEX (#{IDENTIFIER_REGEXP}) ON /
+
+    # A per-column ALTER TABLE statement, with the pg_dump comment introducing
+    # it. Covers SET DEFAULT, SET STATISTICS and SET STORAGE; the value may
+    # contain a quoted string, which may itself contain a semicolon.
+    COLUMN_ALTER_REGEXP = /
+      (?:^--\ Name:\ [^;\n]+;\ Type:\ DEFAULT\n+)?
+      ^ALTER\ TABLE\ (?:ONLY\ )?
+      (?<table>#{IDENTIFIER_REGEXP}(?:\.#{IDENTIFIER_REGEXP})*)
+      \ ALTER\ COLUMN\ (?<column>#{IDENTIFIER_REGEXP})
+      \ SET\ (?:[^;']|'(?:[^']|'')*')+;\n
+    /x
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -157,11 +193,13 @@ module ActiveRecordCleanDbStructure
 
       if options[:indexes_after_tables] == true
         # Extract indexes, remove comments and place them just after the respective tables
+        statements = dump.scan(INDEX_STATEMENT_REGEXP)
+        comments = take_index_comments(statements.map { |line| index_name(line) }.compact)
+
         indexes =
-          dump
-            .scan(INDEX_STATEMENT_REGEXP)
+          statements
             .group_by { |line| line[INDEX_TABLE_REGEXP, 1] }
-            .transform_values(&:join)
+            .transform_values { |lines| lines.map { |line| line + comments[index_name(line)].to_s }.join }
 
         dump.gsub!(/#{INDEX_STATEMENT_REGEXP}\n*/, '')
         dump.gsub!(INDEX_COMMENT_REGEXP, '')
@@ -171,7 +209,12 @@ module ActiveRecordCleanDbStructure
       end
 
       move_unique_constraints if options[:move_unique_constraints_to_tables] == true
-      order_column_definitions if options[:order_column_definitions] == true
+
+      if options[:order_column_definitions] == true
+        order_column_definitions
+        order_per_column_statements(COLUMN_COMMENT_REGEXP)
+        order_per_column_statements(COLUMN_ALTER_REGEXP)
+      end
 
       # Reduce 2+ lines of whitespace to one line of whitespace
       dump.gsub!(/\n{2,}/m, "\n\n")
@@ -199,6 +242,53 @@ module ActiveRecordCleanDbStructure
           .join(",\n")
 
         [table, columns].join
+      end
+    end
+
+    # Removes the COMMENT ON INDEX statements for the given indexes and returns
+    # them keyed by index name, so that each can be put back directly after the
+    # index it describes. pg_dump writes them in a block of their own, which
+    # leaves them stranded once the indexes move to their tables.
+    #
+    # A comment whose index is not in the dump is left where it is, rather than
+    # removed with nowhere to put it back.
+    def take_index_comments(index_names)
+      comments = {}
+
+      dump.gsub!(INDEX_COMMENT_STATEMENT_REGEXP) do |statement|
+        name = Regexp.last_match[:index].delete('"')
+        next statement unless index_names.include?(name)
+
+        comments[name] = statement.sub(/\A--\ Name:[^\n]*\n+/x, '')
+        ''
+      end
+
+      comments
+    end
+
+    def index_name(statement)
+      statement[INDEX_NAME_REGEXP, 1]&.delete('"')
+    end
+
+    # Orders statements that pg_dump writes once per column to match the column
+    # order. The pattern must capture a table and a column name.
+    #
+    # pg_dump writes these in attnum order, which is the order the columns were
+    # added to the source database. Sorting the column definitions but not
+    # these leaves the file internally inconsistent, and that only shows up
+    # after a round trip: loading the file creates the columns in sorted order,
+    # so the next dump writes these sorted too, and every affected table
+    # produces a diff.
+    def order_per_column_statements(regexp)
+      dump.gsub!(/(?:#{regexp}\n*)+/) do |run|
+        statements = []
+        run.scan(regexp) { statements << Regexp.last_match }
+
+        statements
+          .chunk_while { |a, b| a[:table] == b[:table] }
+          .flat_map { |for_table| for_table.sort_by { |m| m[:column].delete('"') } }
+          .map { |m| m[0] }
+          .join("\n") + "\n"
       end
     end
 

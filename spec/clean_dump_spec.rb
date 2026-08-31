@@ -545,6 +545,227 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when ordering column definitions of a table with comments' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              zebra text,
+              alpha text,
+              "timestamp" timestamp without time zone
+          );
+
+          --
+          -- Name: COLUMN call_events.zebra; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON COLUMN waysact.call_events.zebra IS 'The zebra.';
+
+          --
+          -- Name: COLUMN call_events."timestamp"; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON COLUMN waysact.call_events."timestamp" IS 'The timestamp.';
+
+          --
+          -- Name: COLUMN call_events.alpha; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON COLUMN waysact.call_events.alpha IS 'The alpha.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'orders the comments the same way as the columns' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN \S+\.(\S+) IS/).flatten
+        expect(commented).to eq(['alpha', '"timestamp"', 'zebra'])
+      end
+
+      it 'keeps each comment with its own column' do
+        subject.run
+        expect(subject.dump).to include(%{COMMENT ON COLUMN waysact.call_events.alpha IS 'The alpha.';})
+        expect(subject.dump).to include(%{COMMENT ON COLUMN waysact.call_events."timestamp" IS 'The timestamp.';})
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when a column comment spans several lines' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.call_events (
+              zebra text,
+              alpha text
+          );
+
+          COMMENT ON COLUMN waysact.call_events.zebra IS 'The time at which it happened.
+          This is distinct from received_at, and it isn''t always set.';
+
+          COMMENT ON COLUMN waysact.call_events.alpha IS 'The alpha.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'moves the whole statement' do
+        subject.run
+        expect(subject.dump).to include(
+          "COMMENT ON COLUMN waysact.call_events.zebra IS 'The time at which it happened.\n" \
+          "This is distinct from received_at, and it isn''t always set.';"
+        )
+      end
+
+      it 'still sorts it after the alpha comment' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN \S+\.(\S+) IS/).flatten
+        expect(commented).to eq(%w[alpha zebra])
+      end
+    end
+
+    context 'when two tables both have column comments' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          COMMENT ON COLUMN waysact.aaa.zebra IS 'aaa zebra.';
+
+          COMMENT ON COLUMN waysact.aaa.alpha IS 'aaa alpha.';
+
+          COMMENT ON COLUMN waysact.bbb.yankee IS 'bbb yankee.';
+
+          COMMENT ON COLUMN waysact.bbb.bravo IS 'bbb bravo.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'sorts within each table without mixing them' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN (\S+) IS/).flatten
+        expect(commented).to eq(
+          %w[waysact.aaa.alpha waysact.aaa.zebra waysact.bbb.bravo waysact.bbb.yankee]
+        )
+      end
+    end
+
+    context 'when column definitions are not ordered' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          COMMENT ON COLUMN waysact.aaa.zebra IS 'The zebra.';
+
+          COMMENT ON COLUMN waysact.aaa.alpha IS 'The alpha.';
+        STRUCTURE_SQL
+      end
+
+      it 'leaves the comments in the order pg_dump wrote them' do
+        commented = subject.tap(&:run).dump.scan(/^COMMENT ON COLUMN \S+\.(\S+) IS/).flatten
+        expect(commented).to eq(%w[zebra alpha])
+      end
+    end
+
+    context 'when a table has several per-column ALTER TABLE statements' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.events (
+              zebra text,
+              alpha text,
+              "timestamp" timestamp without time zone
+          );
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN zebra SET STORAGE EXTERNAL;
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN "timestamp" SET STATISTICS 500;
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN alpha SET STATISTICS 100;
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'orders them the same way as the columns' do
+        altered = subject.tap(&:run).dump.scan(/ALTER COLUMN (\S+) SET/).flatten
+        expect(altered).to eq(['alpha', '"timestamp"', 'zebra'])
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when per-column ALTER TABLE statements have pg_dump headers' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          --
+          -- Name: events zebra; Type: DEFAULT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN zebra SET DEFAULT nextval('waysact.events_zebra_seq'::regclass);
+
+          --
+          -- Name: events alpha; Type: DEFAULT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN alpha SET DEFAULT nextval('waysact.events_alpha_seq'::regclass);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'moves each header with its statement' do
+        subject.run
+        expect(subject.dump).to include(
+          "-- Name: events alpha; Type: DEFAULT\n\n" \
+          "ALTER TABLE ONLY waysact.events ALTER COLUMN alpha SET DEFAULT nextval('waysact.events_alpha_seq'::regclass);"
+        )
+      end
+
+      it 'orders them by column' do
+        altered = subject.tap(&:run).dump.scan(/ALTER COLUMN (\S+) SET/).flatten
+        expect(altered).to eq(%w[alpha zebra])
+      end
+    end
+
+    context 'when per-column ALTER TABLE statements span two tables' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN zebra SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN alpha SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.bbb ALTER COLUMN yankee SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.bbb ALTER COLUMN bravo SET STATISTICS 100;
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'sorts within each table without mixing them' do
+        altered = subject.tap(&:run).dump.scan(/ALTER TABLE ONLY (\S+) ALTER COLUMN (\S+)/)
+        expect(altered).to eq([%w[waysact.aaa alpha], %w[waysact.aaa zebra],
+                               %w[waysact.bbb bravo], %w[waysact.bbb yankee]])
+      end
+    end
+
+    context 'when column definitions are not ordered but ALTER statements exist' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN zebra SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN alpha SET STATISTICS 100;
+        STRUCTURE_SQL
+      end
+
+      it 'leaves them in the order pg_dump wrote them' do
+        altered = subject.tap(&:run).dump.scan(/ALTER COLUMN (\S+) SET/).flatten
+        expect(altered).to eq(%w[zebra alpha])
+      end
+    end
+
     context 'when sorting indexes' do
       let(:dump) do
         <<~STRUCTURE_SQL
@@ -691,6 +912,87 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       it 'drops ONLY regardless of how the index name is spelled' do
         subject.run
         expect(subject.dump).not_to include('ON ONLY')
+      end
+    end
+
+    context 'when indexes have comments' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          CREATE TABLE waysact.other (
+              id BIGSERIAL
+          );
+
+          --
+          -- Name: idx_users_email; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX idx_users_email ON waysact.users USING btree (email);
+
+          --
+          -- Name: idx_users_name; Type: INDEX; Schema: waysact; Owner: -
+          --
+
+          CREATE INDEX idx_users_name ON waysact.users USING btree (name);
+
+          --
+          -- Name: INDEX idx_users_email; Type: COMMENT; Schema: waysact; Owner: -
+          --
+
+          COMMENT ON INDEX waysact.idx_users_email IS 'Used to find a user''s address, perhaps
+          filtered to only the verified ones.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'puts the comment directly after the index it describes' do
+        subject.run
+        expect(subject.dump).to include(
+          "CREATE INDEX idx_users_email ON waysact.users USING btree (email);\n" \
+          "COMMENT ON INDEX waysact.idx_users_email IS 'Used to find a user''s address, perhaps\n" \
+          "filtered to only the verified ones.';\n"
+        )
+      end
+
+      it 'keeps the comment only once' do
+        subject.run
+        expect(subject.dump.scan('COMMENT ON INDEX').size).to eq(1)
+      end
+
+      it 'still places the uncommented index with its table' do
+        subject.run
+        users = subject.dump[/CREATE TABLE waysact\.users .*?(?=CREATE TABLE|\z)/m]
+        expect(users).to include('CREATE INDEX idx_users_name')
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when an index comment has no matching index' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.users (
+              id BIGSERIAL
+          );
+
+          COMMENT ON INDEX waysact.idx_that_went_away IS 'Orphaned.';
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { indexes_after_tables: true } }
+
+      it 'leaves the comment alone rather than dropping it' do
+        subject.run
+        expect(subject.dump).to include("COMMENT ON INDEX waysact.idx_that_went_away IS 'Orphaned.';")
       end
     end
 

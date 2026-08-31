@@ -127,9 +127,15 @@ Rails.application.configure do
 end
 ```
 
+When `order_column_definitions` is enabled the `COMMENT ON COLUMN` statements and the per-column `ALTER TABLE` statements (`SET DEFAULT`, `SET STATISTICS`, `SET STORAGE`) are sorted the same way, because pg_dump writes them in the order the columns were added to the database. Sorting the columns but not their comments leaves the file inconsistent with itself, which shows up as a large diff the next time the schema is dumped from a database built out of that file.
+
+When `indexes_after_tables` is enabled each `COMMENT ON INDEX` statement is moved to sit directly after the index it describes, instead of staying behind in the block pg_dump wrote it in.
+
 ## Idempotency
 
 The cleaner gives the same result when you run it on its own output. You can therefore use it to check that a committed `structure.sql` is current: clean a fresh dump, then compare it with the committed file.
+
+The output is also stable across a round trip through the database. Loading the file and dumping it again gives back the same file, which is what makes the check above trustworthy.
 
 ## Authors
 

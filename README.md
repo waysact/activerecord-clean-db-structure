@@ -127,7 +127,7 @@ Rails.application.configure do
 end
 ```
 
-When `order_column_definitions` is enabled the `COMMENT ON COLUMN` statements are sorted the same way, because pg_dump writes them in the order the columns were added to the database. Sorting the columns but not their comments leaves the file inconsistent with itself, which shows up as a large diff the next time the schema is dumped from a database built out of that file.
+When `order_column_definitions` is enabled the `COMMENT ON COLUMN` statements and the per-column `ALTER TABLE` statements (`SET DEFAULT`, `SET STATISTICS`, `SET STORAGE`) are sorted the same way, because pg_dump writes them in the order the columns were added to the database. Sorting the columns but not their comments leaves the file inconsistent with itself, which shows up as a large diff the next time the schema is dumped from a database built out of that file.
 
 When `indexes_after_tables` is enabled each `COMMENT ON INDEX` statement is moved to sit directly after the index it describes, instead of staying behind in the block pg_dump wrote it in.
 

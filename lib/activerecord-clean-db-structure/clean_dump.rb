@@ -64,6 +64,17 @@ module ActiveRecordCleanDbStructure
     # The name of the index a CREATE INDEX statement defines.
     INDEX_NAME_REGEXP = /^CREATE(?: UNIQUE)? INDEX (#{IDENTIFIER_REGEXP}) ON /
 
+    # A per-column ALTER TABLE statement, with the pg_dump comment introducing
+    # it. Covers SET DEFAULT, SET STATISTICS and SET STORAGE; the value may
+    # contain a quoted string, which may itself contain a semicolon.
+    COLUMN_ALTER_REGEXP = /
+      (?:^--\ Name:\ [^;\n]+;\ Type:\ DEFAULT\n+)?
+      ^ALTER\ TABLE\ (?:ONLY\ )?
+      (?<table>#{IDENTIFIER_REGEXP}(?:\.#{IDENTIFIER_REGEXP})*)
+      \ ALTER\ COLUMN\ (?<column>#{IDENTIFIER_REGEXP})
+      \ SET\ (?:[^;']|'(?:[^']|'')*')+;\n
+    /x
+
     attr_reader :dump, :options
 
     def initialize(dump, options = {})
@@ -201,7 +212,8 @@ module ActiveRecordCleanDbStructure
 
       if options[:order_column_definitions] == true
         order_column_definitions
-        order_column_comments
+        order_per_column_statements(COLUMN_COMMENT_REGEXP)
+        order_per_column_statements(COLUMN_ALTER_REGEXP)
       end
 
       # Reduce 2+ lines of whitespace to one line of whitespace
@@ -258,23 +270,24 @@ module ActiveRecordCleanDbStructure
       statement[INDEX_NAME_REGEXP, 1]&.delete('"')
     end
 
-    # Orders the COMMENT ON COLUMN statements to match the column order.
+    # Orders statements that pg_dump writes once per column to match the column
+    # order. The pattern must capture a table and a column name.
     #
-    # pg_dump writes them in attnum order, which is the order the columns were
-    # added to the source database. Sorting the column definitions but not the
-    # comments leaves the file internally inconsistent, and that only shows up
+    # pg_dump writes these in attnum order, which is the order the columns were
+    # added to the source database. Sorting the column definitions but not
+    # these leaves the file internally inconsistent, and that only shows up
     # after a round trip: loading the file creates the columns in sorted order,
-    # so the next dump writes the comments sorted too, and every commented
-    # table produces a diff.
-    def order_column_comments
-      dump.gsub!(/(?:#{COLUMN_COMMENT_REGEXP}\n*)+/) do |run|
-        comments = []
-        run.scan(COLUMN_COMMENT_REGEXP) { comments << Regexp.last_match }
+    # so the next dump writes these sorted too, and every affected table
+    # produces a diff.
+    def order_per_column_statements(regexp)
+      dump.gsub!(/(?:#{regexp}\n*)+/) do |run|
+        statements = []
+        run.scan(regexp) { statements << Regexp.last_match }
 
-        comments
+        statements
           .chunk_while { |a, b| a[:table] == b[:table] }
-          .flat_map { |table_comments| table_comments.sort_by { |c| c[:column].delete('"') } }
-          .map { |c| c[0] }
+          .flat_map { |for_table| for_table.sort_by { |m| m[:column].delete('"') } }
+          .map { |m| m[0] }
           .join("\n") + "\n"
       end
     end

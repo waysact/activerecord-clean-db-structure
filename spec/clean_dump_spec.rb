@@ -664,6 +664,108 @@ RSpec.describe ActiveRecordCleanDbStructure::CleanDump do
       end
     end
 
+    context 'when a table has several per-column ALTER TABLE statements' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          CREATE TABLE waysact.events (
+              zebra text,
+              alpha text,
+              "timestamp" timestamp without time zone
+          );
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN zebra SET STORAGE EXTERNAL;
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN "timestamp" SET STATISTICS 500;
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN alpha SET STATISTICS 100;
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'orders them the same way as the columns' do
+        altered = subject.tap(&:run).dump.scan(/ALTER COLUMN (\S+) SET/).flatten
+        expect(altered).to eq(['alpha', '"timestamp"', 'zebra'])
+      end
+
+      it 'is unchanged by a second pass' do
+        first_pass = described_class.new(dump.dup, options).tap(&:run).dump
+        second_pass = described_class.new(first_pass.dup, options).tap(&:run).dump
+
+        expect(second_pass).to eq(first_pass)
+      end
+    end
+
+    context 'when per-column ALTER TABLE statements have pg_dump headers' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          --
+          -- Name: events zebra; Type: DEFAULT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN zebra SET DEFAULT nextval('waysact.events_zebra_seq'::regclass);
+
+          --
+          -- Name: events alpha; Type: DEFAULT; Schema: waysact; Owner: -
+          --
+
+          ALTER TABLE ONLY waysact.events ALTER COLUMN alpha SET DEFAULT nextval('waysact.events_alpha_seq'::regclass);
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'moves each header with its statement' do
+        subject.run
+        expect(subject.dump).to include(
+          "-- Name: events alpha; Type: DEFAULT\n\n" \
+          "ALTER TABLE ONLY waysact.events ALTER COLUMN alpha SET DEFAULT nextval('waysact.events_alpha_seq'::regclass);"
+        )
+      end
+
+      it 'orders them by column' do
+        altered = subject.tap(&:run).dump.scan(/ALTER COLUMN (\S+) SET/).flatten
+        expect(altered).to eq(%w[alpha zebra])
+      end
+    end
+
+    context 'when per-column ALTER TABLE statements span two tables' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN zebra SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN alpha SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.bbb ALTER COLUMN yankee SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.bbb ALTER COLUMN bravo SET STATISTICS 100;
+        STRUCTURE_SQL
+      end
+
+      let(:options) { { order_column_definitions: true } }
+
+      it 'sorts within each table without mixing them' do
+        altered = subject.tap(&:run).dump.scan(/ALTER TABLE ONLY (\S+) ALTER COLUMN (\S+)/)
+        expect(altered).to eq([%w[waysact.aaa alpha], %w[waysact.aaa zebra],
+                               %w[waysact.bbb bravo], %w[waysact.bbb yankee]])
+      end
+    end
+
+    context 'when column definitions are not ordered but ALTER statements exist' do
+      let(:dump) do
+        <<~STRUCTURE_SQL
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN zebra SET STATISTICS 100;
+
+          ALTER TABLE ONLY waysact.aaa ALTER COLUMN alpha SET STATISTICS 100;
+        STRUCTURE_SQL
+      end
+
+      it 'leaves them in the order pg_dump wrote them' do
+        altered = subject.tap(&:run).dump.scan(/ALTER COLUMN (\S+) SET/).flatten
+        expect(altered).to eq(%w[zebra alpha])
+      end
+    end
+
     context 'when sorting indexes' do
       let(:dump) do
         <<~STRUCTURE_SQL
